@@ -63,7 +63,7 @@ BPF_TEST_BUILD_ARGS ?=
 BPF_SOURCE_DIRS := bpf/bpfnat bpf/networkacl
 BPF_C_SOURCES := $(shell find $(BPF_SOURCE_DIRS) -type f \( -name '*.c' -o -name '*.h' \) | sort)
 
-.PHONY: all clean test storage-test e2e e2e-runtime-binaries e2e-runtime-case e2e-runtime-suite release release-binary release-cli runc-shim sandbox-logger firecracker-agent firecracker-initrd protobuf-image protos protos-local check-protos bpf-image bpf bpf-local bpf-format bpf-format-local check-bpf-format check-bpf-format-local check-bpf-generated check-bpf bpfnat-test-image bpfnat-test bpfnat-test-local networkacl-test networkacl-test-local tidy vendor fmt check-fmt vet help
+.PHONY: all clean test storage-test e2e e2e-runtime-binaries e2e-runtime-case e2e-runtime-suite release release-binary release-cli runc-shim sandbox-logger firecracker-agent firecracker-initrd ascend-oci-adapter protobuf-image protos protos-local check-protos bpf-image bpf bpf-local bpf-format bpf-format-local check-bpf-format check-bpf-format-local check-bpf-generated check-bpf bpfnat-test-image bpfnat-test bpfnat-test-local networkacl-test networkacl-test-local tidy vendor fmt check-fmt vet help
 .DEFAULT_GOAL := all
 
 all: release ## build binaries
@@ -90,6 +90,12 @@ sandbox-logger:
 firecracker-agent:
 	@echo "Building output/firecracker-agent"
 	@CGO_ENABLED=0 GOOS=$(RELEASE_GOOS) GOARCH=$(RELEASE_GOARCH) $(GO) build -o output/firecracker-agent ./cmd/firecracker-agent
+
+ascend-oci-adapter: ## build the optional external Ascend OCI adapter
+	@echo "Building output/ascend-oci-adapter"
+	@cd tools/ascend-oci-adapter && \
+		CGO_ENABLED=1 GOOS=$(RELEASE_GOOS) GOARCH=$(RELEASE_GOARCH) \
+		$(GO) build -trimpath -ldflags="-s -w" -o ../../output/ascend-oci-adapter .
 
 # Minimal guest initrd for Firecracker microVMs: a newc cpio containing only
 # /init = the statically linked firecracker-agent, gzip-compressed (speed over
@@ -251,7 +257,7 @@ fmt: ## format Go code
 	go fmt ./...
 
 check-fmt: ## verify Go code is gofmt-clean
-	@files="$$(gofmt -l .)" || exit $$?; \
+	@files="$$(gofmt -l $$(git ls-files '*.go'))" || exit $$?; \
 	test -z "$$files" || { printf '%s\n' "$$files" >&2; exit 1; }
 
 vet: ## run go vet

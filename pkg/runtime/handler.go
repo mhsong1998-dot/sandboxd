@@ -107,9 +107,13 @@ type StartConfig struct {
 // this boundary so vendor-specific discovery and authorization do not leak
 // into the runsc client.
 type SpecUpdates struct {
-	Envs        []*runtime.KeyValue
-	Prestart    []Hook
-	Annotations map[string]string
+	Envs                   []*runtime.KeyValue
+	Prestart               []Hook
+	Annotations            map[string]string
+	AdditionalCapabilities []string
+	LinuxDevices           []LinuxDevice
+	DeviceCgroupRules      []LinuxDeviceCgroup
+	Mounts                 []Mount
 	// RequiresHostWritableRootfs requests a private writable rootfs view
 	// before provider hooks execute. It is separate from the writable layer
 	// visible to workloads after the sandbox starts.

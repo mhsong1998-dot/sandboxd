@@ -33,13 +33,15 @@ The `sbox` binary is an administrative CLI for managing sandboxes.
 
 ### NVIDIA GPU sandboxes
 
-GPU support is experimental and currently uses gVisor runsc with nvproxy. The
-scheduler passes concrete node-local device IDs through
+GPU support is experimental. It supports gVisor runsc through nvproxy and
+native runc through the NVIDIA OCI prestart hook. The scheduler passes concrete
+node-local device IDs through
 `StartRequest.xpu_allocations`; sandboxd resolves them to NVIDIA UUIDs and
 maintains a local exclusive lease:
 
 ```bash
 sbox start \
+  --runtime runc \
   --rootfs /path/to/directory-rootfs \
   --xpu-allocation gpu:0,2 \
   /bin/sleep 300
@@ -103,6 +105,17 @@ make networkacl-test
 make bpfnat-test
 ```
 
+The Ascend OCI adapter is an optional external process and is not linked into
+the default sandboxd binary. Initialize its vendor dependency and build it with:
+
+```bash
+git submodule update --init third_party/mind-cluster
+make ascend-oci-adapter
+```
+
+The default read-only driver mount profile is
+`configs/ascend/mounts.json`; deployments install it alongside the adapter.
+
 `networkacl-test` runs one backend-neutral conformance suite against native
 iptables and TC eBPF enforcement in isolated network namespaces. It covers
 allow and deny precedence, exact and wildcard peers, peer and sandbox ports,
@@ -165,11 +178,12 @@ tools/               pinned protobuf code-generation image
   KVM continue to support gVisor. Firecracker additionally requires a compatible
   guest kernel/initrd, an EROFS root image, and the ext4 image tool. Nodes that
   enable OCI/Nydus rootfs materialization also require `mkfs.erofs`.
-- NVIDIA GPU sandboxes require runsc, a directory/lisafs-backed rootfs,
-  `nvidia-container-cli`, accessible NVIDIA devices and userspace driver
-  libraries, and a host driver supported by the pinned runsc nvproxy. Kata,
-  Firecracker, runc, MIG, fractional GPUs, and regular-file/EROFS rootfs are
-  not supported.
+- NVIDIA GPU sandboxes require `nvidia-container-cli`, the executable NVIDIA
+  OCI runtime hook, accessible NVIDIA devices and userspace driver libraries.
+  Runsc additionally requires a host driver supported by its pinned nvproxy
+  compatibility gate and a directory/lisafs-backed rootfs. Runc accepts the
+  normal directory or EROFS rootfs through its writable host overlay. Kata,
+  Firecracker, MIG, and fractional GPUs are not supported.
 - sandboxd detects the local cgroup mode at startup. Legacy and hybrid hosts use cgroup v1; unified hosts use cgroup v2. The gRPC API and resource-cache behavior are identical in both modes.
 - `[plugin.resource].disable_cgroup = true` enables an experimental/debug
   compatibility mode for environments where sandboxd cannot write the

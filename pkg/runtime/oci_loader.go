@@ -194,6 +194,12 @@ func (r *BundleLoader) GenerateOci(options OciLoadOptions) (string, *Spec, error
 			ociSpec.Hooks.Prestart = append(ociSpec.Hooks.Prestart, updates.Prestart...)
 		}
 		ociSpec.Annotations = combineAnnotations(ociSpec.Annotations, updates.Annotations)
+		if err := applyProviderCapabilities(ociSpec, updates.AdditionalCapabilities); err != nil {
+			return "", ociSpec, err
+		}
+		if err := applyProviderDevicesAndMounts(ociSpec, updates); err != nil {
+			return "", ociSpec, err
+		}
 	}
 
 	ociFile := filepath.Join(bundleDir, config.SandboxSpecFile)
@@ -209,6 +215,101 @@ func (r *BundleLoader) GenerateOci(options OciLoadOptions) (string, *Spec, error
 	buf, _ := util.UnescapedMarshal(ociSpec)
 	logrus.Debugf("write spec to %v, content: %v", ociFile, string(buf))
 	return bundleDir, ociSpec, os.WriteFile(ociFile, buf, 0644)
+}
+
+func applyProviderCapabilities(spec *Spec, capabilities []string) error {
+	if len(capabilities) == 0 {
+		return nil
+	}
+	if spec.Process == nil || spec.Process.Capabilities == nil {
+		return errors.New("provider capabilities require a process capability set")
+	}
+	for _, capability := range capabilities {
+		// Ascend 310P management calls traverse driver-owned paths that require
+		// DAC override. Keep this provider boundary fail-closed instead of
+		// accepting arbitrary capability names from device implementations.
+		if capability != "CAP_DAC_OVERRIDE" {
+			return fmt.Errorf("provider capability %q is not allowed", capability)
+		}
+		sets := []*[]string{
+			&spec.Process.Capabilities.Bounding,
+			&spec.Process.Capabilities.Effective,
+			&spec.Process.Capabilities.Inheritable,
+			&spec.Process.Capabilities.Permitted,
+		}
+		for _, set := range sets {
+			if !containsCapability(*set, capability) {
+				*set = append(*set, capability)
+			}
+		}
+	}
+	return nil
+}
+
+func containsCapability(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
+}
+
+func applyProviderDevicesAndMounts(spec *Spec, updates *SpecUpdates) error {
+	if spec.Linux == nil {
+		spec.Linux = &Linux{}
+	}
+	if spec.Linux.Resources == nil {
+		spec.Linux.Resources = &LinuxResources{}
+	}
+	devicePaths := make(map[string]struct{}, len(spec.Linux.Devices)+len(updates.LinuxDevices))
+	for _, device := range spec.Linux.Devices {
+		devicePaths[device.Path] = struct{}{}
+	}
+	for _, device := range updates.LinuxDevices {
+		if device.Path == "" || !filepath.IsAbs(device.Path) || device.Type != "c" ||
+			device.Major < 0 || device.Minor < 0 {
+			return fmt.Errorf("invalid provider device %q", device.Path)
+		}
+		if _, duplicate := devicePaths[device.Path]; duplicate {
+			return fmt.Errorf("provider device conflicts at %s", device.Path)
+		}
+		devicePaths[device.Path] = struct{}{}
+		spec.Linux.Devices = append(spec.Linux.Devices, device)
+	}
+	for _, rule := range updates.DeviceCgroupRules {
+		if !rule.Allow || rule.Type != "c" || rule.Major == nil || rule.Minor == nil ||
+			*rule.Major < 0 || *rule.Minor < 0 || rule.Access != "rwm" {
+			return errors.New("invalid provider device cgroup rule")
+		}
+		spec.Linux.Resources.Devices = append(spec.Linux.Resources.Devices, rule)
+	}
+	mountTargets := make(map[string]struct{}, len(spec.Mounts)+len(updates.Mounts))
+	for _, mount := range spec.Mounts {
+		mountTargets[filepath.Clean(mount.Destination)] = struct{}{}
+	}
+	for _, mount := range updates.Mounts {
+		destination := filepath.Clean(mount.Destination)
+		if !filepath.IsAbs(destination) || destination == "/" || !filepath.IsAbs(mount.Source) ||
+			mount.Type != "bind" || !containsMountOption(mount.Options, "ro") {
+			return fmt.Errorf("invalid provider mount %s -> %s", mount.Source, mount.Destination)
+		}
+		if _, conflict := mountTargets[destination]; conflict {
+			return fmt.Errorf("provider mount conflicts at %s", destination)
+		}
+		mountTargets[destination] = struct{}{}
+		spec.Mounts = append(spec.Mounts, mount)
+	}
+	return nil
+}
+
+func containsMountOption(options []string, expected string) bool {
+	for _, option := range options {
+		if option == expected {
+			return true
+		}
+	}
+	return false
 }
 
 func setNetworkNamespace(linux *Linux, path string) {
