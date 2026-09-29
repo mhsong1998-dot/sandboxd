@@ -82,12 +82,6 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	shutdownTrace, traceErr := trace.InitOTLP(ctx)
-	if traceErr != nil {
-		logrus.WithError(traceErr).Warn("sandboxd tracing unavailable")
-	} else {
-		defer shutdownTrace()
-	}
 
 	if configFile == "" {
 		configFile = filepath.Join(root, "config.toml")

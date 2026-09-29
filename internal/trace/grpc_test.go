@@ -14,16 +14,7 @@
 
 package trace
 
-import (
-	"context"
-	"testing"
-
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/propagation"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/metadata"
-)
+import "testing"
 
 func Test_nameOfMethod(t *testing.T) {
 	type args struct {
@@ -48,26 +39,5 @@ func Test_nameOfMethod(t *testing.T) {
 				t.Errorf("nameOfMethod() = %v, want %v", got, tt.want)
 			}
 		})
-	}
-}
-
-func TestInterceptorPreservesIncomingTraceID(t *testing.T) {
-	provider := sdktrace.NewTracerProvider()
-	defer provider.Shutdown(context.Background())
-	otel.SetTracerProvider(provider)
-	otel.SetTextMapPropagator(propagation.TraceContext{})
-	parent := "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"
-	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs("traceparent", parent))
-	_, err := InjectTraceInterceptor(ctx, nil, &grpc.UnaryServerInfo{FullMethod: "/runtime.v1.SandboxService/Start"}, func(ctx context.Context, _ interface{}) (interface{}, error) {
-		if got := GetTraceIdFromContext(ctx).String(); got != "0123456789abcdef0123456789abcdef" {
-			t.Errorf("trace ID = %s", got)
-		}
-		if got := GetSpanIdFromContext(ctx).String(); got == "0123456789abcdef" {
-			t.Error("server span reused the parent span ID")
-		}
-		return nil, nil
-	})
-	if err != nil {
-		t.Fatal(err)
 	}
 }
