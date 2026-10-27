@@ -1415,6 +1415,9 @@ type StartRequest struct {
 	InjectEntrypoint string `protobuf:"bytes,22,opt,name=inject_entrypoint,json=injectEntrypoint,proto3" json:"inject_entrypoint,omitempty"`
 	// PreferImagePath lets the image's PATH override the request's fallback PATH.
 	PreferImagePath bool `protobuf:"varint,23,opt,name=prefer_image_path,json=preferImagePath,proto3" json:"prefer_image_path,omitempty"`
+	// StartKey identifies one start attempt independently of the generated sandbox ID.
+	// Never reuse a key for another execution. Delete can fence a timed-out attempt.
+	StartKey      string `protobuf:"bytes,24,opt,name=start_key,json=startKey,proto3" json:"start_key,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -1608,6 +1611,13 @@ func (x *StartRequest) GetPreferImagePath() bool {
 		return x.PreferImagePath
 	}
 	return false
+}
+
+func (x *StartRequest) GetStartKey() string {
+	if x != nil {
+		return x.StartKey
+	}
+	return ""
 }
 
 // StartResponse is returned after sandbox start.
@@ -1821,7 +1831,10 @@ type DeleteRequest struct {
 	ID string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
 	// Timeout is reserved for graceful deletion. v0.1.0 ignores it and always
 	// force-deletes the sandbox.
-	Timeout       int64 `protobuf:"varint,2,opt,name=timeout,proto3" json:"timeout,omitempty"`
+	Timeout int64 `protobuf:"varint,2,opt,name=timeout,proto3" json:"timeout,omitempty"`
+	// StartKey cancels and fences this start attempt, waits for its handler to settle,
+	// then deletes its sandbox. ID must be empty when this field is set.
+	StartKey      string `protobuf:"bytes,3,opt,name=start_key,json=startKey,proto3" json:"start_key,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1868,6 +1881,13 @@ func (x *DeleteRequest) GetTimeout() int64 {
 		return x.Timeout
 	}
 	return 0
+}
+
+func (x *DeleteRequest) GetStartKey() string {
+	if x != nil {
+		return x.StartKey
+	}
+	return ""
 }
 
 // DeleteResponse is returned after sandbox delete.
@@ -3042,7 +3062,7 @@ const file_api_runtime_v1_sandbox_api_proto_rawDesc = "" +
 	"\n" +
 	"device_ids\x18\x02 \x03(\rR\tdeviceIds\"7\n" +
 	"\x0eCheckpointInfo\x12%\n" +
-	"\x0echeckpoint_dir\x18\x01 \x01(\tR\rcheckpointDir\"\xf1\t\n" +
+	"\x0echeckpoint_dir\x18\x01 \x01(\tR\rcheckpointDir\"\x8e\n\n" +
 	"\fStartRequest\x12\x1d\n" +
 	"\n" +
 	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\x12\x1f\n" +
@@ -3069,7 +3089,8 @@ const file_api_runtime_v1_sandbox_api_proto_rawDesc = "" +
 	"\x0enetwork_policy\x18\x14 \x01(\v2\x19.runtime.v1.NetworkPolicyR\rnetworkPolicy\x12C\n" +
 	"\x0fcheckpoint_info\x18\x15 \x01(\v2\x1a.runtime.v1.CheckpointInfoR\x0echeckpointInfo\x12+\n" +
 	"\x11inject_entrypoint\x18\x16 \x01(\tR\x10injectEntrypoint\x12*\n" +
-	"\x11prefer_image_path\x18\x17 \x01(\bR\x0fpreferImagePath\x1a7\n" +
+	"\x11prefer_image_path\x18\x17 \x01(\bR\x0fpreferImagePath\x12\x1b\n" +
+	"\tstart_key\x18\x18 \x01(\tR\bstartKey\x1a7\n" +
 	"\tEnvsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1a<\n" +
@@ -3095,10 +3116,11 @@ const file_api_runtime_v1_sandbox_api_proto_rawDesc = "" +
 	"\bcompress\x18\x04 \x01(\bR\bcompress\x12#\n" +
 	"\rleave_running\x18\x05 \x01(\bR\fleaveRunning\x12#\n" +
 	"\rsnapshot_type\x18\x06 \x01(\tR\fsnapshotType\"\x14\n" +
-	"\x12CheckpointResponse\"9\n" +
+	"\x12CheckpointResponse\"V\n" +
 	"\rDeleteRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x18\n" +
-	"\atimeout\x18\x02 \x01(\x03R\atimeout\"\x10\n" +
+	"\atimeout\x18\x02 \x01(\x03R\atimeout\x12\x1b\n" +
+	"\tstart_key\x18\x03 \x01(\tR\bstartKey\"\x10\n" +
 	"\x0eDeleteResponse\"\x1d\n" +
 	"\vWaitRequest\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\"]\n" +

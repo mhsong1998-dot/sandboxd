@@ -35,8 +35,8 @@ func TestV010WireContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	sum := sha256.Sum256(wire)
-	// Rolled for StartRequest.prefer_image_path (field 23), an opt-in flag
-	// that leaves the existing request fields and default behavior unchanged.
+	// Rolled for StartRequest.start_key (field 24) and DeleteRequest.start_key
+	// (field 3). Existing message fields and RPC method identities are unchanged.
 	// Recompute after any proto change: run this test, copy the got hash.
 	const want = "397a1f9b10afb4227fb5c23fe79ddebc96d925c03d2583c8712eee0d90c7a249"
 	if got := hex.EncodeToString(sum[:]); got != want {
