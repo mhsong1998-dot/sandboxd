@@ -48,6 +48,15 @@ func TestDeleteStartKeyFencesRequestThatHasNotArrived(t *testing.T) {
 }
 
 func TestDeleteStartKeyCancelsBlockedOCIPreparation(t *testing.T) {
+	checkBlockedStartCleanup(t, false)
+}
+
+func TestRestartInventoryFindsAndCancelsPendingStartByPhysicalID(t *testing.T) {
+	checkBlockedStartCleanup(t, true)
+}
+
+func checkBlockedStartCleanup(t *testing.T, physical bool) {
+	t.Helper()
 	registry := testregistry.New(t, "manifest")
 	manager, err := oci.NewManager(t.TempDir(), "")
 	if err != nil {
@@ -61,9 +70,11 @@ func TestDeleteStartKeyCancelsBlockedOCIPreparation(t *testing.T) {
 	handler := &cancelStartHandler{Handler: svc.NewFakeRuntimeHandler()}
 	s := newTestService(t, map[string]svc.Handler{config.RuntimeNameRunc: handler})
 	s.fsMgr = newFSManager(worker)
+	startCtx, cancelStart := context.WithCancel(context.Background())
+	defer cancelStart()
 	done := make(chan error, 1)
 	go func() {
-		_, err := s.Start(context.Background(), &runtime.StartRequest{StartKey: "blocked-attempt", Runtime: config.RuntimeNameRunc, Rootfs: &runtime.RootfsConfig{Type: runtime.RootfsSrcType_IMAGE, Source: &runtime.RootfsConfig_ImageUrl{ImageUrl: registry.ImageURL}}})
+		_, err := s.Start(startCtx, &runtime.StartRequest{StartKey: "blocked-attempt", Runtime: config.RuntimeNameRunc, Rootfs: &runtime.RootfsConfig{Type: runtime.RootfsSrcType_IMAGE, Source: &runtime.RootfsConfig_ImageUrl{ImageUrl: registry.ImageURL}}})
 		done <- err
 	}()
 	select {
@@ -71,7 +82,21 @@ func TestDeleteStartKeyCancelsBlockedOCIPreparation(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("download not reached")
 	}
-	if _, err := s.Delete(fenceContext(), &runtime.DeleteRequest{StartKey: "blocked-attempt"}); err != nil {
+	deletion := &runtime.DeleteRequest{StartKey: "blocked-attempt"}
+	if physical {
+		// A restarted caller has lost the Start key. Its authoritative inventory
+		// must still see the in-flight attempt before it commits a real sandbox.
+		inventory, err := s.List(context.Background(), &runtime.ListSandboxesRequest{})
+		if err != nil || len(inventory.Sandboxes) != 1 {
+			t.Fatalf("pending Start is absent from recovery inventory: %v %v", inventory, err)
+		}
+		pending := inventory.Sandboxes[0]
+		if pending.State != runtime.SandboxState_SANDBOX_STATE_UNKNOWN || pending.Labels[startKeyLabel] != "blocked-attempt" {
+			t.Fatal(pending)
+		}
+		deletion = &runtime.DeleteRequest{ID: pending.ID}
+	}
+	if _, err := s.Delete(fenceContext(), deletion); err != nil {
 		t.Fatal(err)
 	}
 	select {

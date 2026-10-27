@@ -33,6 +33,7 @@ type startOperation struct {
 	cancel    context.CancelFunc
 	sandboxID string
 	fenced    bool
+	pending   *runtime.SandboxStatus
 }
 
 func validStartKey(key string) bool {
@@ -63,6 +64,7 @@ func (h *sandboxService) beginStart(ctx context.Context, key string) (context.Co
 		cancel()
 		h.startMu.Lock()
 		op.cancel = nil
+		op.pending = nil
 		close(op.done)
 		h.startMu.Unlock()
 	}, nil
@@ -151,4 +153,48 @@ func (h *sandboxService) forgetSettledStart(id string) {
 			delete(h.startOperations, key)
 		}
 	}
+}
+
+// The inventory snapshot and finishStart share startMu: an attempt cannot
+// disappear between reading committed metadata and copying its pending status.
+func (h *sandboxService) pendingInventoryLocked(req *runtime.ListSandboxesRequest) []*runtime.SandboxStatus {
+	var result []*runtime.SandboxStatus
+	for _, op := range h.startOperations {
+		if op.cancel == nil || op.pending == nil || (req.ID != "" && req.ID != op.sandboxID) {
+			continue
+		}
+		matches := true
+		if req.ID == "" {
+			for k, v := range req.Selector {
+				if op.pending.Labels[k] != v {
+					matches = false
+					break
+				}
+			}
+		}
+		if matches {
+			result = append(result, &runtime.SandboxStatus{ID: op.pending.ID, Runtime: op.pending.Runtime, State: runtime.SandboxState_SANDBOX_STATE_UNKNOWN, Labels: copyStringMap(op.pending.Labels), MetricLabels: copyStringMap(op.pending.MetricLabels), Stdout: op.pending.Stdout, Stderr: op.pending.Stderr})
+		}
+	}
+	return result
+}
+
+func (h *sandboxService) setStartInventory(req *runtime.StartRequest) {
+	if req.StartKey == "" {
+		return
+	}
+	h.startMu.Lock()
+	defer h.startMu.Unlock()
+	h.startOperations[req.StartKey].pending = &runtime.SandboxStatus{ID: req.SandboxID, Runtime: req.Runtime, Labels: copyStringMap(req.Labels), MetricLabels: copyStringMap(req.MetricLabels), Stdout: req.Stdout, Stderr: req.Stderr}
+}
+
+func (h *sandboxService) activeStartKey(id string) string {
+	h.startMu.Lock()
+	defer h.startMu.Unlock()
+	for key, op := range h.startOperations {
+		if op.cancel != nil && op.sandboxID == id {
+			return key
+		}
+	}
+	return ""
 }
