@@ -68,6 +68,10 @@ cgroup-disabled execution is selected.
 See [test/e2e/README.md](test/e2e/README.md#gpu-debug-image) for the validated
 GPU debug image and manual CUDA test.
 
+## OCI image cache
+
+`[plugin.image].oci_zero_ref_ttl` configures node-wide retention of unreferenced OCI layers and lowerdirs. Omit it for the existing 30-minute TTL, or set it to `"0s"` to retain idle cache until disk-pressure GC needs the space. See [OCI cache retention](doc/oci-cache.md) for configuration and cleanup semantics.
+
 ## Network backends
 
 Sandboxd supports two NAT backends:
@@ -85,6 +89,12 @@ Sandboxd owns TAP devices in the host network namespace whose names use its
 `plugin.network.ip_range`. Startup recovery may reattach, reconfigure, and
 reuse those devices. Other software must not create TAP devices in this
 reserved namespace.
+
+Sandboxd records the Linux boot ID alongside its metadata. A service restart in the same boot preserves active cgroup and TAP leases; missing or replaced active TAP devices still fail startup. When the boot ID changes, only the previous kernel's persisted cgroup and network lease caches are retired. Sandbox metadata, image-manager state, and checkpoint files remain available for normal reconciliation. An unstamped legacy store is adopted without discarding leases because a missing stamp does not prove a host reboot. This allows a worker's Pod to retain its identity across a reboot without treating vanished kernel resources as live; it does not restore sandbox processes or select a checkpoint automatically.
+
+Before accepting RPCs, startup recovery also asks runsc to delete untracked records that explicitly report stopped with no positive process ID. This covers crashes that leave runtime state but no readable sandbox metadata. It uses the runtime's deletion boundary, preserves tracked records and live or ambiguous states, and fails startup on runtime inspection or cleanup errors. Other runtime adapters are unchanged.
+
+Network ACL recovery also checks current runsc state. A tracked instance confirmed stopped without a positive PID no longer needs its old TAP binding restored; its metadata remains available for normal deletion. Persisted Running status alone is insufficient after a reboot. Live, missing, and ambiguous runtime states retain strict endpoint recovery, and an inspection error fails startup.
 
 An optional per-sandbox ACL uses native netfilter and ipset with the `iptables`
 backend and TC eBPF with the `bpfnat` backend. Both support prioritized
