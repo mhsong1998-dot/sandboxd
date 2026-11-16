@@ -39,6 +39,7 @@ import (
 	"github.com/inclusionAI/sandboxd/pkg/errord"
 	"github.com/inclusionAI/sandboxd/pkg/imagemanager"
 	imageapi "github.com/inclusionAI/sandboxd/pkg/imagemanager/api"
+	"github.com/inclusionAI/sandboxd/pkg/imagemanager/nydusinput"
 	"github.com/inclusionAI/sandboxd/pkg/networkmanager"
 	"github.com/inclusionAI/sandboxd/pkg/networkmanager/networkacl"
 	// The side-effect imports register the available NAT backends before
@@ -1294,7 +1295,21 @@ func (h *sandboxService) Start(ctx context.Context, request *runtime.StartReques
 		err := fmt.Errorf("rootfs is required")
 		return &runtime.StartResponse{Code: -1, Message: err.Error()}, err
 	}
-	if startReq.InjectEntrypoint != "" && startReq.Rootfs.GetType() != runtime.RootfsSrcType_IMAGE {
+	if startReq.Rootfs.GetType() == runtime.RootfsSrcType_NYDUS {
+		if startReq.Runtime != config.RuntimeNameRunsc {
+			err := fmt.Errorf("prepared Nydus rootfs currently requires runsc: %w", errord.ErrFailedPrecondition)
+			return &runtime.StartResponse{Code: -1, Message: err.Error()}, errord.ToGRPC(err)
+		}
+		if err := nydusinput.ValidateMetadata(startReq.Rootfs.GetNydus()); err != nil {
+			wrapped := fmt.Errorf("invalid prepared Nydus input: %v: %w", err, errord.ErrInvalidArgument)
+			return &runtime.StartResponse{Code: -1, Message: wrapped.Error()}, errord.ToGRPC(wrapped)
+		}
+	}
+	if startReq.Rootfs.GetType() == runtime.RootfsSrcType_NYDUS && startReq.CheckpointInfo != nil {
+		err := fmt.Errorf("prepared Nydus checkpoint restore is not supported: %w", errord.ErrFailedPrecondition)
+		return &runtime.StartResponse{Code: -1, Message: err.Error()}, errord.ToGRPC(err)
+	}
+	if startReq.InjectEntrypoint != "" && startReq.Rootfs.GetType() != runtime.RootfsSrcType_IMAGE && startReq.Rootfs.GetType() != runtime.RootfsSrcType_NYDUS {
 		err := errors.New("inject_entrypoint requires an OCI or Nydus image rootfs")
 		return &runtime.StartResponse{Code: -1, Message: err.Error()},
 			errord.ToGRPC(fmt.Errorf("%v: %w", err, errord.ErrInvalidArgument))

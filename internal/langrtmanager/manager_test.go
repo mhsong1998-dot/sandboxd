@@ -471,3 +471,23 @@ func TestHighConcurrencyMixed(t *testing.T) {
 	t.Logf("completed %d ops (adders=%d, getters=%d, listers=%d), final runtimes=%d",
 		totalOps.Load(), numAdders, numGetters, numListers, len(lm.List()))
 }
+
+func TestSharedRootfsCachePreservesLegacyFieldBoundaries(t *testing.T) {
+	mounter := &mockMounter{}
+	manager := NewLanguageRuntimeManager(mounter)
+	// These are distinct legacy sources even though colon-concatenated keys
+	// cannot distinguish their field boundaries.
+	first := RootfsConfig{SrcType: api.RootfsSrcType_S3, Endpoint: "a:b", Bucket: "c"}
+	second := RootfsConfig{SrcType: api.RootfsSrcType_S3, Endpoint: "a", Bucket: "b:c"}
+	a, err := manager.GetRootfs(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := manager.GetRootfs(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a == b || mounter.MountCount() != 2 {
+		t.Fatal("distinct legacy rootfs sources shared a mount")
+	}
+}

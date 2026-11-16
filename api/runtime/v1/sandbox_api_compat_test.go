@@ -21,6 +21,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
+	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/descriptorpb"
 	"google.golang.org/protobuf/types/dynamicpb"
 )
@@ -35,10 +36,10 @@ func TestV010WireContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	sum := sha256.Sum256(wire)
-	// Rolled for StartResponse.sandbox_ip (field 4), required for YuanRong
-	// Node Proxy route registration; existing response fields are unchanged.
+	// Rolled for the additive NYDUS source (enum 3, RootfsConfig source 7)
+	// and its prepared input messages. Existing field numbers remain pinned below.
 	// Recompute after any proto change: run this test, copy the got hash.
-	const want = "21eb701d4c16828d5f4ac42d6a50d6f644e038b6b967b4c5165a9dd025aed67b"
+	const want = "5067c1ad10c565624834dcbdec3add737f1273dffa3569cee6b9866336534280"
 	if got := hex.EncodeToString(sum[:]); got != want {
 		t.Fatalf("sandbox API descriptor hash = %s, want %s", got, want)
 	}
@@ -84,5 +85,35 @@ func TestStartResponseLegacyWireCompatibility(t *testing.T) {
 	}
 	if decoded.ID != response.ID || decoded.Message != response.Message || decoded.SandboxIp != "" {
 		t.Fatalf("legacy server response did not retain its original fields: %s", &decoded)
+	}
+}
+
+// New prepared input must not change how existing clients encode rootfs sources.
+func TestRootfsLegacyWireFieldsUnchanged(t *testing.T) {
+	d := (&RootfsConfig{}).ProtoReflect().Descriptor()
+	for name, number := range map[string]int32{"readonly": 1, "type": 2, "image_url": 3, "s3_config": 4, "path": 5, "writable_layer_size_bytes": 6} {
+		field := d.Fields().ByName(protoreflect.Name(name))
+		if field == nil || int32(field.Number()) != number {
+			t.Fatalf("legacy rootfs field %s moved", name)
+		}
+	}
+	if RootfsSrcType_S3 != 0 || RootfsSrcType_IMAGE != 1 || RootfsSrcType_LOCAL != 2 {
+		t.Fatal("legacy source enum changed")
+	}
+	for _, original := range []*RootfsConfig{
+		{Type: RootfsSrcType_IMAGE, Source: &RootfsConfig_ImageUrl{ImageUrl: "registry/image@sha256:fixed"}},
+		{Type: RootfsSrcType_LOCAL, Source: &RootfsConfig_Path{Path: "/existing/rootfs"}},
+	} {
+		data, err := proto.Marshal(original)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoded := &RootfsConfig{}
+		if err := proto.Unmarshal(data, decoded); err != nil {
+			t.Fatal(err)
+		}
+		if !proto.Equal(original, decoded) {
+			t.Fatal("legacy source failed round trip")
+		}
 	}
 }

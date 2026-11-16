@@ -21,7 +21,9 @@ import (
 	"sync"
 
 	api "github.com/inclusionAI/sandboxd/api/runtime/v1"
+	"github.com/inclusionAI/sandboxd/pkg/imagemanager/nydusinput"
 	"github.com/sirupsen/logrus"
+	"google.golang.org/protobuf/proto"
 )
 
 type SeedInfo struct {
@@ -43,7 +45,7 @@ type LangRTManager struct {
 	lrtMap map[string]*LanguageRuntime
 
 	rfMu      sync.Mutex
-	rootfsMap map[RootfsConfig]*rootfsEntry
+	rootfsMap map[rootfsKey]*rootfsEntry
 }
 
 func (lm *LangRTManager) GetRootfs(cfg RootfsConfig) (*RootFS, error) {
@@ -51,12 +53,21 @@ func (lm *LangRTManager) GetRootfs(cfg RootfsConfig) (*RootFS, error) {
 }
 
 func (lm *LangRTManager) getRootfs(ctx context.Context, cfg RootfsConfig) (*RootFS, error) {
+	if cfg.Prepared != nil {
+		id, err := nydusinput.Identity(cfg.Prepared)
+		if err != nil {
+			return nil, err
+		}
+		cfg.PreparedKey = id
+		cfg.Prepared = proto.Clone(cfg.Prepared).(*api.PreparedNydusSource)
+	}
+	key := cfg.cacheKey()
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		lm.rfMu.Lock()
-		if entry, ok := lm.rootfsMap[cfg]; ok {
+		if entry, ok := lm.rootfsMap[key]; ok {
 			lm.rfMu.Unlock()
 			select {
 			case <-ctx.Done():
@@ -71,19 +82,19 @@ func (lm *LangRTManager) getRootfs(ctx context.Context, cfg RootfsConfig) (*Root
 			return entry.rootfs, entry.err
 		}
 		entry := &rootfsEntry{ready: make(chan struct{})}
-		lm.rootfsMap[cfg] = entry
+		lm.rootfsMap[key] = entry
 		lm.rfMu.Unlock()
 		rootfs, err := newRootFS(ctx, cfg, lm.mounter, func() {
 			lm.rfMu.Lock()
 			defer lm.rfMu.Unlock()
-			if lm.rootfsMap[cfg] == entry {
-				delete(lm.rootfsMap, cfg)
+			if lm.rootfsMap[key] == entry {
+				delete(lm.rootfsMap, key)
 			}
 		})
 		lm.rfMu.Lock()
 		entry.rootfs, entry.err = rootfs, err
-		if err != nil && lm.rootfsMap[cfg] == entry {
-			delete(lm.rootfsMap, cfg)
+		if err != nil && lm.rootfsMap[key] == entry {
+			delete(lm.rootfsMap, key)
 		}
 		close(entry.ready)
 		lm.rfMu.Unlock()
@@ -117,7 +128,7 @@ func NewLanguageRuntimeManager(mounter ...ImageMounter) *LangRTManager {
 	return &LangRTManager{
 		mounter:   m,
 		lrtMap:    make(map[string]*LanguageRuntime),
-		rootfsMap: make(map[RootfsConfig]*rootfsEntry),
+		rootfsMap: make(map[rootfsKey]*rootfsEntry),
 	}
 }
 
@@ -173,6 +184,13 @@ func (lm *LangRTManager) AddLangRuntimeWithContext(ctx context.Context, request 
 			SrcType:  request.Rootfs.Type,
 			ImageUrl: imageUrl,
 		}
+	case api.RootfsSrcType_NYDUS:
+		input := request.Rootfs.GetNydus()
+		key, err := nydusinput.Identity(input)
+		if err != nil {
+			return nil, err
+		}
+		cfg = RootfsConfig{SrcType: request.Rootfs.Type, Prepared: proto.Clone(input).(*api.PreparedNydusSource), PreparedKey: key}
 	case api.RootfsSrcType_LOCAL:
 		path := request.Rootfs.GetPath()
 		if path == "" {

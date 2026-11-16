@@ -23,6 +23,7 @@ import (
 	runtime_api "github.com/inclusionAI/sandboxd/api/runtime/v1"
 	"github.com/inclusionAI/sandboxd/pkg/imagemanager/api"
 	"github.com/inclusionAI/sandboxd/pkg/imagemanager/imageconfig"
+	"github.com/inclusionAI/sandboxd/pkg/imagemanager/nydusinput"
 	"github.com/sirupsen/logrus"
 )
 
@@ -46,7 +47,9 @@ type RootFS struct {
 }
 
 type RootfsConfig struct {
-	SrcType runtime_api.RootfsSrcType
+	Prepared    *runtime_api.PreparedNydusSource
+	PreparedKey string
+	SrcType     runtime_api.RootfsSrcType
 
 	// OSS
 	Endpoint        string
@@ -62,7 +65,23 @@ type RootfsConfig struct {
 	Path string
 }
 
+// rootfsKey preserves legacy field boundaries while excluding mutable pointers.
+type rootfsKey struct {
+	src                                                                                runtime_api.RootfsSrcType
+	endpoint, bucket, object, accessKeyID, accessKeySecret, imageURL, path, preparedID string
+}
+
+func (cfg RootfsConfig) cacheKey() rootfsKey {
+	return rootfsKey{cfg.SrcType, cfg.Endpoint, cfg.Bucket, cfg.Object, cfg.AccessKeyID, cfg.AccessKeySecret, cfg.ImageUrl, cfg.Path, cfg.PreparedKey}
+}
+
+// String avoids logging caller-prepared image environment values.
+func (cfg RootfsConfig) String() string { return cfg.key() }
+
 func (cfg RootfsConfig) key() string {
+	if cfg.SrcType == runtime_api.RootfsSrcType_NYDUS {
+		return "prepared-nydus:" + cfg.PreparedKey
+	}
 	return fmt.Sprintf("%d:%s:%s:%s:%s:%s:%s:%s",
 		cfg.SrcType,
 		cfg.Endpoint,
@@ -166,6 +185,16 @@ func (d *defaultMounter) Mount(ctx context.Context, cfg RootfsConfig) (string, [
 		}
 		return mi.FilePath, mi.Env, mi.ImageProcess, nil
 
+	case runtime_api.RootfsSrcType_NYDUS:
+		svc, ok := d.client().(api.PreparedNydusService)
+		if !ok {
+			return "", nil, nil, fmt.Errorf("prepared Nydus service is unavailable")
+		}
+		info, err := svc.MountPreparedNydus(ctx, cfg.Prepared)
+		if err != nil {
+			return "", nil, nil, err
+		}
+		return info.MountPoint, info.Env, info.ImageProcess, nil
 	case runtime_api.RootfsSrcType_IMAGE:
 		resp, err := d.client().MountOCI(ctx, &api.OCIMountRequest{
 			ImageURL: cfg.ImageUrl,
@@ -189,6 +218,12 @@ func (d *defaultMounter) Mount(ctx context.Context, cfg RootfsConfig) (string, [
 }
 
 func (d *defaultMounter) ImageProcess(ctx context.Context, cfg RootfsConfig) (*imageconfig.Process, error) {
+	if cfg.SrcType == runtime_api.RootfsSrcType_NYDUS {
+		if err := nydusinput.ValidateMetadata(cfg.Prepared); err != nil {
+			return nil, err
+		}
+		return nydusinput.Process(cfg.Prepared), nil
+	}
 	if cfg.SrcType != runtime_api.RootfsSrcType_IMAGE {
 		return nil, fmt.Errorf("image process config requires an image rootfs")
 	}
@@ -207,6 +242,12 @@ func (d *defaultMounter) Umount(cfg RootfsConfig) error {
 		return d.client().UmountOCI(&api.OCIUmountRequest{
 			ImageURL: cfg.ImageUrl,
 		})
+	case runtime_api.RootfsSrcType_NYDUS:
+		svc, ok := d.client().(api.PreparedNydusService)
+		if !ok {
+			return fmt.Errorf("prepared Nydus service is unavailable")
+		}
+		return svc.UmountPreparedNydus(cfg.Prepared)
 	case runtime_api.RootfsSrcType_LOCAL:
 		return nil
 	default:

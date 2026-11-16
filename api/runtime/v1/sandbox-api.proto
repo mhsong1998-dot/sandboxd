@@ -155,6 +155,8 @@ enum RootfsSrcType {
   S3    = 0;
   IMAGE = 1;
   LOCAL = 2;
+  // NYDUS uses caller-prepared metadata and a generic localfs blob backend.
+  NYDUS = 3;
 }
 
 // S3Config describes an S3 object source.
@@ -164,6 +166,38 @@ message S3Config {
   string object            = 3;
   string access_key_id     = 4;
   string access_key_secret = 5;
+}
+
+// LocalFsConfig describes ordinary host files used as Nydus blob sources.
+message LocalFsConfig {
+  string dir = 1;
+  string blob_file = 2;
+  repeated string alt_dirs = 3;
+}
+
+// NydusImageProcess carries already-resolved image defaults. Presence matters:
+// an empty message is a resolved image with no default command.
+message NydusImageProcess {
+  repeated string entrypoint = 1;
+  repeated string cmd = 2;
+  string cwd = 3;
+  string user = 4;
+}
+
+// NydusImageConfig is image metadata, not the distill_fs backend configuration.
+message NydusImageConfig {
+  repeated string env = 1;
+  NydusImageProcess process = 2;
+}
+
+// PreparedNydusSource supplies immutable, caller-owned files. sandboxd manages
+// the distill_fs daemon and mount but never deletes these input files.
+message PreparedNydusSource {
+  string image_id = 1;
+  string bootstrap_path = 2;
+  string bootstrap_sha256 = 3;
+  LocalFsConfig localfs = 4;
+  NydusImageConfig image_config = 5;
 }
 
 // RootfsConfig describes the sandbox root filesystem source.
@@ -179,6 +213,8 @@ message RootfsConfig {
     S3Config s3_config = 4;
     // Path is a local directory or file used as the root filesystem source.
     string path = 5;
+    // Nydus supplies prepared metadata and a local blob backend.
+    PreparedNydusSource nydus = 7;
   }
   // WritableLayerSizeBytes is a compatibility alias used by existing
   // Function Proxy clients. sandboxd normalizes it to the start request's

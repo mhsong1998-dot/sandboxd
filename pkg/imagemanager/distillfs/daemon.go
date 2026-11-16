@@ -32,8 +32,10 @@ import (
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
 
+	runtime "github.com/inclusionAI/sandboxd/api/runtime/v1"
 	"github.com/inclusionAI/sandboxd/pkg/imagemanager/imageconfig"
 	"github.com/inclusionAI/sandboxd/pkg/imagemanager/imgcgroup"
+	"github.com/inclusionAI/sandboxd/pkg/imagemanager/nydusinput"
 	"github.com/inclusionAI/sandboxd/pkg/imagemanager/registryauth"
 )
 
@@ -123,8 +125,15 @@ type RegistryConfig struct {
 	Proxy              *ProxyConfig `json:"proxy,omitempty"`
 }
 
+type LocalFsConfig struct {
+	Dir      string   `json:"dir,omitempty"`
+	BlobFile string   `json:"blob_file,omitempty"`
+	AltDirs  []string `json:"alt_dirs,omitempty"`
+}
+
 // BackendConfig maps to nydus_api::BackendConfigV2
 type BackendConfig struct {
+	Localfs     *LocalFsConfig  `json:"localfs,omitempty"`
 	BackendType string          `json:"type"` // "oss", "registry", "localfs", etc.
 	Oss         *OssConfig      `json:"oss,omitempty"`
 	Registry    *RegistryConfig `json:"registry,omitempty"`
@@ -148,6 +157,11 @@ type RegistryAuthsConfig = registryauth.Config
 // DeepCopy returns a deep copy of BackendConfig, duplicating all pointer fields
 func (cfg *BackendConfig) DeepCopy() BackendConfig {
 	out := *cfg
+	if cfg.Localfs != nil {
+		v := *cfg.Localfs
+		v.AltDirs = append([]string(nil), cfg.Localfs.AltDirs...)
+		out.Localfs = &v
+	}
 	if cfg.Oss != nil {
 		ossCopy := *cfg.Oss
 		if cfg.Oss.Proxy != nil {
@@ -180,32 +194,35 @@ func (cfg *BackendConfig) LoadTemplate(templatePath string) error {
 }
 
 type DaemonMeta struct {
-	ID            string               `json:"id"`
-	Name          string               `json:"name"`
-	CfgPath       string               `json:"cfg_path"`
-	MountPoint    string               `json:"mount_point"`
-	DaemonDir     string               `json:"daemon_dir"`
-	DaemonLogPath string               `json:"daemon_log_path"`
-	PidFilePath   string               `json:"pid_file_path"`
-	CachePath     string               `json:"cache_path"`
-	ImageMetaDir  string               `json:"image_meta_dir"`
-	ChunkDBDir    string               `json:"chunk_db_dir"`
-	SourceType    string               `json:"source_type,omitempty"`    // "oss" or "nydus"
-	BootstrapPath string               `json:"bootstrap_path,omitempty"` // For Nydus: path to bootstrap file
-	CacheDir      string               `json:"cache_dir,omitempty"`      // For Nydus: --cache-dir parameter
-	ImageURL      string               `json:"image_url,omitempty"`      // For Nydus: image URL for bootstrap download
-	Env           []string             `json:"env,omitempty"`            // Environment variables from image config
-	EnvResolved   bool                 `json:"env_resolved,omitempty"`   // True after env has been extracted (distinguishes nil env from unresolved)
-	ImageProcess  *imageconfig.Process `json:"image_process,omitempty"`
+	Prepared      *runtime.PreparedNydusSource `json:"prepared_nydus,omitempty"`
+	ID            string                       `json:"id"`
+	Name          string                       `json:"name"`
+	CfgPath       string                       `json:"cfg_path"`
+	MountPoint    string                       `json:"mount_point"`
+	DaemonDir     string                       `json:"daemon_dir"`
+	DaemonLogPath string                       `json:"daemon_log_path"`
+	PidFilePath   string                       `json:"pid_file_path"`
+	CachePath     string                       `json:"cache_path"`
+	ImageMetaDir  string                       `json:"image_meta_dir"`
+	ChunkDBDir    string                       `json:"chunk_db_dir"`
+	SourceType    string                       `json:"source_type,omitempty"`    // "oss" or "nydus"
+	BootstrapPath string                       `json:"bootstrap_path,omitempty"` // For Nydus: path to bootstrap file
+	CacheDir      string                       `json:"cache_dir,omitempty"`      // For Nydus: --cache-dir parameter
+	ImageURL      string                       `json:"image_url,omitempty"`      // For Nydus: image URL for bootstrap download
+	Env           []string                     `json:"env,omitempty"`            // Environment variables from image config
+	EnvResolved   bool                         `json:"env_resolved,omitempty"`   // True after env has been extracted (distinguishes nil env from unresolved)
+	ImageProcess  *imageconfig.Process         `json:"image_process,omitempty"`
 }
 
 // DaemonInfo contains basic information about a daemon
 type DaemonInfo struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	MountPoint string `json:"mount_point"`
-	SourceType string `json:"source_type"`
-	IsAlive    bool   `json:"is_alive"`
+	PreparedID    string `json:"prepared_id,omitempty"`
+	BootstrapPath string `json:"bootstrap_path,omitempty"`
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	MountPoint    string `json:"mount_point"`
+	SourceType    string `json:"source_type"`
+	IsAlive       bool   `json:"is_alive"`
 }
 
 type Daemon struct {
@@ -258,6 +275,9 @@ func (d *Daemon) daemonLogFields() logrus.Fields {
 }
 
 func (d *Daemon) saveMeta() error {
+	if d.meta.Prepared != nil {
+		return d.savePreparedMeta()
+	}
 	file, err := os.OpenFile(d.savedPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
 		return fmt.Errorf("failed to open file %s: %w", d.savedPath, err)
@@ -267,6 +287,37 @@ func (d *Daemon) saveMeta() error {
 		return fmt.Errorf("failed to dump json format: %w", err)
 	}
 	return nil
+}
+
+// Prepared metadata contains caller-owned input references and must survive a
+// process crash without leaving a truncated record or world-readable defaults.
+func (d *Daemon) savePreparedMeta() error {
+	file, err := os.CreateTemp(filepath.Dir(d.savedPath), ".prepared-*.json")
+	if err != nil {
+		return err
+	}
+	name := file.Name()
+	defer os.Remove(name)
+	if err := json.NewEncoder(file).Encode(&d.meta); err != nil {
+		file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(name, d.savedPath); err != nil {
+		return err
+	}
+	dir, err := os.Open(filepath.Dir(d.savedPath))
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 func (d *Daemon) loadBackendConfig() error {
@@ -299,6 +350,18 @@ func (d *Daemon) ResolveImageProcess(ctx context.Context) (*imageconfig.Process,
 		return nil, fmt.Errorf("daemon %s is not backed by a Nydus image", d.meta.ID)
 	}
 	if d.meta.ImageProcess != nil {
+		return imageconfig.Clone(d.meta.ImageProcess), nil
+	}
+	if d.meta.Prepared != nil {
+		if err := nydusinput.ValidateMetadata(d.meta.Prepared); err != nil {
+			return nil, err
+		}
+		d.meta.Env = append([]string(nil), d.meta.Prepared.ImageConfig.Env...)
+		d.meta.EnvResolved = true
+		d.meta.ImageProcess = nydusinput.Process(d.meta.Prepared)
+		if err := d.saveMeta(); err != nil {
+			return nil, err
+		}
 		return imageconfig.Clone(d.meta.ImageProcess), nil
 	}
 	if d.nydusClient == nil || d.meta.ImageURL == "" {
@@ -747,8 +810,16 @@ func (d *Daemon) initializeDaemon(ctx context.Context, timing *TimedOperation) e
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	// For Nydus: download bootstrap if not exists
-	if d.meta.SourceType == "nydus" && d.meta.BootstrapPath == "" {
+	// Caller-prepared input is complete and must never trigger Registry fallback.
+	if d.meta.Prepared != nil {
+		if err := nydusinput.Validate(d.meta.Prepared); err != nil {
+			return err
+		}
+		d.meta.BootstrapPath = d.meta.Prepared.BootstrapPath
+		d.meta.Env = append([]string(nil), d.meta.Prepared.ImageConfig.Env...)
+		d.meta.EnvResolved = true
+		d.meta.ImageProcess = nydusinput.Process(d.meta.Prepared)
+	} else if d.meta.SourceType == "nydus" && d.meta.BootstrapPath == "" {
 		if d.meta.ImageURL == "" || d.nydusClient == nil {
 			err := fmt.Errorf("ImageURL and nydusClient required for Nydus daemon")
 			logrus.WithFields(d.daemonLogFields()).WithError(err).Error("failed to start daemon")

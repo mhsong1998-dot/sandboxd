@@ -30,13 +30,17 @@ import (
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/sirupsen/logrus"
 
+	runtime "github.com/inclusionAI/sandboxd/api/runtime/v1"
 	"github.com/inclusionAI/sandboxd/pkg/imagemanager/diskusage"
 	"github.com/inclusionAI/sandboxd/pkg/imagemanager/imageconfig"
 	"github.com/inclusionAI/sandboxd/pkg/imagemanager/imgcgroup"
+	"github.com/inclusionAI/sandboxd/pkg/imagemanager/nydusinput"
 	"github.com/inclusionAI/sandboxd/pkg/imagemanager/registryauth"
+	"google.golang.org/protobuf/proto"
 )
 
 type DaemonCreateOpt struct {
+	Prepared   *runtime.PreparedNydusSource
 	ID         string
 	Name       string
 	MountPoint string
@@ -513,6 +517,18 @@ func (mgr *manager) setupNydusDaemon(opts *DaemonCreateOpt) (*Daemon, error) {
 		return nil, fmt.Errorf("failed to create cache dir: %w", err)
 	}
 
+	if opts.Prepared != nil {
+		if err := nydusinput.Validate(opts.Prepared); err != nil {
+			return nil, err
+		}
+		d.meta.Prepared = proto.Clone(opts.Prepared).(*runtime.PreparedNydusSource)
+		d.meta.BootstrapPath = d.meta.Prepared.BootstrapPath
+		d.meta.Env = append([]string(nil), d.meta.Prepared.ImageConfig.Env...)
+		d.meta.EnvResolved = true
+		d.meta.ImageProcess = nydusinput.Process(d.meta.Prepared)
+		b := d.meta.Prepared.Localfs
+		d.config = &BackendConfig{BackendType: "localfs", Localfs: &LocalFsConfig{Dir: b.Dir, BlobFile: b.BlobFile, AltDirs: append([]string(nil), b.AltDirs...)}}
+	}
 	d.meta.DaemonDir = daemonDir
 	d.meta.ImageMetaDir = filepath.Join(mgr.root, "image_metas", d.meta.ID)
 	d.meta.DaemonLogPath = filepath.Join(daemonDir, "daemon.log")
@@ -867,7 +883,14 @@ func (mgr *manager) ListDaemons() []DaemonInfo {
 
 	infos := make([]DaemonInfo, 0, len(mgr.daemons))
 	for _, d := range mgr.daemons {
+		preparedID := ""
+		bootstrap := ""
+		if d.meta.Prepared != nil {
+			preparedID = d.meta.ID
+			bootstrap = d.meta.Prepared.BootstrapPath
+		}
 		infos = append(infos, DaemonInfo{
+			PreparedID: preparedID, BootstrapPath: bootstrap,
 			ID:         d.meta.ID,
 			Name:       d.meta.Name,
 			MountPoint: d.meta.MountPoint,
