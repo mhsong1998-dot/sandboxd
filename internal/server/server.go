@@ -332,7 +332,7 @@ func (h *sandboxService) deleteSandboxRuntime(ctx context.Context, sandboxID str
 	}
 
 	stage = trace.BeginDeleteStage(ctx)
-	err = h.fsMgr.Release(sandboxID)
+	err = h.fsMgr.ReleaseWithContext(ctx, sandboxID)
 	stage.End("filesystem_release")
 	if err != nil {
 		return err

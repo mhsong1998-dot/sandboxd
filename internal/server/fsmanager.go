@@ -19,12 +19,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"sync"
 
 	runtime "github.com/inclusionAI/sandboxd/api/runtime/v1"
 	"github.com/inclusionAI/sandboxd/config"
 	"github.com/inclusionAI/sandboxd/internal/langrtmanager"
+	"github.com/inclusionAI/sandboxd/internal/trace"
 	"github.com/inclusionAI/sandboxd/pkg/errord"
 	imageapi "github.com/inclusionAI/sandboxd/pkg/imagemanager/api"
 	"github.com/inclusionAI/sandboxd/pkg/store"
@@ -44,6 +46,11 @@ type fsManager struct {
 	sandboxState    map[string]sandboxFSState
 	store           store.DbStore
 	persistMu       sync.Mutex
+
+	groupWrites     bool
+	writeQueueMu    sync.Mutex
+	writeQueue      []*fsStateWrite
+	flushInProgress bool
 }
 
 type preparedFS struct {
@@ -81,6 +88,7 @@ func newFSManager(imgSvc imageapi.Service, stores ...store.DbStore) *fsManager {
 		sandboxOCIMount: make(map[string][]string),
 		sandboxState:    make(map[string]sandboxFSState),
 		store:           stateStore,
+		groupWrites:     os.Getenv("SANDBOXD_FS_GROUP_COMMIT") == "1",
 	}
 }
 
@@ -174,36 +182,37 @@ func (m *fsManager) Commit(sandboxID string, prepared *preparedFS) error {
 		return fmt.Errorf("encode filesystem state for sandbox %s: %w", sandboxID, err)
 	}
 
-	m.persistMu.Lock()
-	defer m.persistMu.Unlock()
-	m.mu.Lock()
-	if _, exists := m.sandboxState[sandboxID]; exists {
-		m.mu.Unlock()
-		return fmt.Errorf("filesystem state for sandbox %s already exists", sandboxID)
+	result := m.writeFSState(func() (func(), error) {
+		if _, exists := m.sandboxState[sandboxID]; exists {
+			return nil, fmt.Errorf("filesystem state for sandbox %s already exists", sandboxID)
+		}
+		m.sandboxRootfs[sandboxID] = prepared.rootfs
+		if len(prepared.s3) > 0 {
+			m.sandboxS3Mount[sandboxID] = append([]*runtime.S3Config(nil), prepared.s3...)
+		}
+		if len(prepared.oci) > 0 {
+			m.sandboxOCIMount[sandboxID] = append([]string(nil), prepared.oci...)
+		}
+		m.sandboxState[sandboxID] = state
+		return func() {
+			delete(m.sandboxRootfs, sandboxID)
+			delete(m.sandboxS3Mount, sandboxID)
+			delete(m.sandboxOCIMount, sandboxID)
+			delete(m.sandboxState, sandboxID)
+		}, nil
+	}, true)
+	if result.failedToPersist {
+		return fmt.Errorf("persist filesystem state for sandbox %s: %w", sandboxID, result.err)
 	}
-	m.sandboxRootfs[sandboxID] = prepared.rootfs
-	if len(prepared.s3) > 0 {
-		m.sandboxS3Mount[sandboxID] = append([]*runtime.S3Config(nil), prepared.s3...)
-	}
-	if len(prepared.oci) > 0 {
-		m.sandboxOCIMount[sandboxID] = append([]string(nil), prepared.oci...)
-	}
-	m.sandboxState[sandboxID] = state
-	m.mu.Unlock()
-	if err := m.persistCurrentState(); err != nil {
-		m.mu.Lock()
-		delete(m.sandboxRootfs, sandboxID)
-		delete(m.sandboxS3Mount, sandboxID)
-		delete(m.sandboxOCIMount, sandboxID)
-		delete(m.sandboxState, sandboxID)
-		m.mu.Unlock()
-		return fmt.Errorf("persist filesystem state for sandbox %s: %w", sandboxID, err)
-	}
-	return nil
+	return result.err
 }
 
 func (m *fsManager) Release(sandboxID string) error {
-	return m.release(sandboxID, true)
+	return m.release(context.Background(), sandboxID, true)
+}
+
+func (m *fsManager) ReleaseWithContext(ctx context.Context, sandboxID string) error {
+	return m.release(ctx, sandboxID, true)
 }
 
 func (m *fsManager) Shutdown() {
@@ -338,7 +347,7 @@ func (m *fsManager) Restore(sandboxExists func(string) bool) error {
 			continue
 		}
 		if orphaned[sandboxID] {
-			_ = m.release(sandboxID, false)
+			_ = m.release(context.Background(), sandboxID, false)
 		}
 	}
 	if len(restoreErrors) > 0 {
@@ -392,25 +401,24 @@ func (m *fsManager) restoreSandbox(sandboxID string, state sandboxFSState) (retE
 	return nil
 }
 
-func (m *fsManager) release(sandboxID string, persist bool) error {
+func (m *fsManager) release(ctx context.Context, sandboxID string, persist bool) error {
 	if sandboxID == "" {
 		return nil
 	}
 
-	m.persistMu.Lock()
-	m.mu.Lock()
-	rootfs := m.sandboxRootfs[sandboxID]
-	s3Configs := append([]*runtime.S3Config(nil), m.sandboxS3Mount[sandboxID]...)
-	ociURLs := append([]string(nil), m.sandboxOCIMount[sandboxID]...)
-	state, stateExists := m.sandboxState[sandboxID]
-	delete(m.sandboxRootfs, sandboxID)
-	delete(m.sandboxS3Mount, sandboxID)
-	delete(m.sandboxOCIMount, sandboxID)
-	delete(m.sandboxState, sandboxID)
-	m.mu.Unlock()
-	if persist {
-		if err := m.persistCurrentState(); err != nil {
-			m.mu.Lock()
+	var rootfs *langrtmanager.LanguageRuntime
+	var s3Configs []*runtime.S3Config
+	var ociURLs []string
+	result := m.writeFSState(func() (func(), error) {
+		rootfs = m.sandboxRootfs[sandboxID]
+		s3Configs = append([]*runtime.S3Config(nil), m.sandboxS3Mount[sandboxID]...)
+		ociURLs = append([]string(nil), m.sandboxOCIMount[sandboxID]...)
+		state, stateExists := m.sandboxState[sandboxID]
+		delete(m.sandboxRootfs, sandboxID)
+		delete(m.sandboxS3Mount, sandboxID)
+		delete(m.sandboxOCIMount, sandboxID)
+		delete(m.sandboxState, sandboxID)
+		return func() {
 			if rootfs != nil {
 				m.sandboxRootfs[sandboxID] = rootfs
 			}
@@ -423,16 +431,21 @@ func (m *fsManager) release(sandboxID string, persist bool) error {
 			if stateExists {
 				m.sandboxState[sandboxID] = state
 			}
-			m.mu.Unlock()
-			m.persistMu.Unlock()
-			return fmt.Errorf("persist released filesystem state for sandbox %s: %w", sandboxID, err)
-		}
+		}, nil
+	}, persist)
+	trace.RecordDeleteDuration(ctx, "fs_persist_wait", result.wait)
+	trace.RecordDeleteDuration(ctx, "fs_persist_write", result.write)
+	trace.RecordDeleteValue(ctx, "fs_persist_batch_size", result.batchSize)
+	if result.err != nil {
+		return fmt.Errorf("persist released filesystem state for sandbox %s: %w", sandboxID, result.err)
 	}
-	m.persistMu.Unlock()
 
+	stage := trace.BeginDeleteStage(ctx)
 	if rootfs != nil {
 		rootfs.DecRef()
 	}
+	stage.End("fs_rootfs_release")
+	stage = trace.BeginDeleteStage(ctx)
 	for _, cfg := range s3Configs {
 		if err := m.s3.unmountS3(cfg); err != nil {
 			logrus.Warnf("failed to unmount S3 for sandbox %s: %v", sandboxID, err)
@@ -443,6 +456,7 @@ func (m *fsManager) release(sandboxID string, persist bool) error {
 			logrus.Warnf("failed to unmount OCI image for sandbox %s: %v", sandboxID, err)
 		}
 	}
+	stage.End("fs_additional_mounts_release")
 	return nil
 }
 

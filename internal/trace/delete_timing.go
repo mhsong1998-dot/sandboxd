@@ -47,6 +47,7 @@ type DeleteCleanupTiming struct {
 	ended   time.Time
 	active  int64
 	stages  map[string]time.Duration
+	values  map[string]int
 }
 
 type DeleteStage struct {
@@ -95,6 +96,27 @@ func (s DeleteStage) End(stage string) {
 	}
 }
 
+func RecordDeleteDuration(ctx context.Context, stage string, elapsed time.Duration) {
+	if !deleteTimingEnabled {
+		return
+	}
+	if cleanup, _ := ctx.Value(deleteTimingKey{}).(*DeleteCleanupTiming); cleanup != nil {
+		cleanup.stages[stage] += elapsed
+	}
+}
+
+func RecordDeleteValue(ctx context.Context, name string, value int) {
+	if !deleteTimingEnabled {
+		return
+	}
+	if cleanup, _ := ctx.Value(deleteTimingKey{}).(*DeleteCleanupTiming); cleanup != nil {
+		if cleanup.values == nil {
+			cleanup.values = make(map[string]int)
+		}
+		cleanup.values[name] = value
+	}
+}
+
 func logDeleteTiming(id oteltrace.TraceID, elapsed time.Duration, err error) bool {
 	return err != nil || elapsed >= slowDelete || id[15]&63 == 0
 }
@@ -118,6 +140,9 @@ func (t *DeleteCleanupTiming) Finish(err error) {
 	}
 	for stage, elapsed := range t.stages {
 		fields[stage+"_us"] = elapsed.Microseconds()
+	}
+	for name, value := range t.values {
+		fields[name] = value
 	}
 	logrus.WithFields(fields).Info("sandboxd delete cleanup timing")
 }
