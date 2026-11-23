@@ -40,6 +40,9 @@ var _ DbStore = &BboltStoreImp{}
 
 type BboltStoreImp struct {
 	path string
+	// Serialize this store's handles before bbolt.Open. Opening competing
+	// handles to the same file would enter bbolt's 50ms flock retry loop.
+	openMu sync.Mutex
 }
 
 func NewStoreImp(path string) *BboltStoreImp {
@@ -56,6 +59,8 @@ func NewStoreImp(path string) *BboltStoreImp {
 }
 
 func (f *BboltStoreImp) Store(key string, data interface{}) error {
+	f.openMu.Lock()
+	defer f.openMu.Unlock()
 	db, err := bolt.Open(f.path, 0777, nil)
 	if err != nil {
 		return err
@@ -86,6 +91,8 @@ type DecodeType struct {
 }
 
 func (f *BboltStoreImp) StoreRaw(key string, data []byte) error {
+	f.openMu.Lock()
+	defer f.openMu.Unlock()
 	db, err := bolt.Open(f.path, 0777, nil)
 	if err != nil {
 		return err
@@ -101,6 +108,8 @@ func (f *BboltStoreImp) StoreRaw(key string, data []byte) error {
 }
 
 func (f *BboltStoreImp) Load(key string) (*types.Any, error) {
+	f.openMu.Lock()
+	defer f.openMu.Unlock()
 	db, err := bolt.Open(f.path, 0666, nil)
 	if err != nil {
 		return nil, err
@@ -124,6 +133,8 @@ func (f *BboltStoreImp) Load(key string) (*types.Any, error) {
 }
 
 func (f *BboltStoreImp) LoadRaw(key string) ([]byte, error) {
+	f.openMu.Lock()
+	defer f.openMu.Unlock()
 	db, err := bolt.Open(f.path, 0666, nil)
 	if err != nil {
 		return nil, err
