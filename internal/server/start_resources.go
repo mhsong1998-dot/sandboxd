@@ -15,11 +15,13 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
 
 	"github.com/inclusionAI/sandboxd/config"
+	"github.com/inclusionAI/sandboxd/internal/trace"
 	"github.com/inclusionAI/sandboxd/pkg/networkmanager"
 	"github.com/inclusionAI/sandboxd/pkg/sandbox"
 	"github.com/sirupsen/logrus"
@@ -160,9 +162,21 @@ func (h *sandboxService) deactivateStartNetwork(resources sandbox.OccupiedResour
 }
 
 func (h *sandboxService) releaseStartResources(resources sandbox.OccupiedResource) error {
+	return h.releaseStartResourcesWithContext(context.Background(), resources)
+}
+
+func (h *sandboxService) releaseStartResourcesWithContext(ctx context.Context, resources sandbox.OccupiedResource) error {
 	var errs []error
 	for name, value := range resources.Resources {
-		if err := h.releaseStartResource(name, value); err != nil {
+		stage := trace.BeginDeleteStage(ctx)
+		err := h.releaseStartResource(name, value)
+		switch name {
+		case config.ResourceNameCgroup:
+			stage.End("cgroup_recycle")
+		case config.ResourceNameInterface:
+			stage.End("network_release")
+		}
+		if err != nil {
 			errs = append(errs, fmt.Errorf("release resource %s[%s] failed: %w", name, value, err))
 			continue
 		}

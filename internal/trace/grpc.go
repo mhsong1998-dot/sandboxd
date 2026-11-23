@@ -21,14 +21,21 @@ import (
 
 	"github.com/inclusionAI/sandboxd/internal/metrics"
 	"github.com/sirupsen/logrus"
+	"go.opentelemetry.io/otel/propagation"
+	oteltrace "go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
 )
 
 func InjectTraceInterceptor(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
 	// get trace id from context
 	traceID, ok := ctx.Value(ContextKeyTraceId).(string)
 	if !ok {
-		traceID = GetTraceIdFromContext(ctx).String()
+		if parent := requestParent(ctx); parent.IsValid() {
+			traceID = parent.TraceID().String()
+		} else {
+			traceID = GetTraceIdFromContext(ctx).String()
+		}
 		ctx = context.WithValue(ctx, ContextKeyTraceId, traceID)
 	}
 	logrus.WithField(ContextKeyTraceId, traceID).Debugf("received %s request, raw-request:[%+v]", info.FullMethod, req)
@@ -42,6 +49,18 @@ func InjectTraceInterceptor(ctx context.Context, req interface{}, info *grpc.Una
 		metrics.RecordActionResult(nameOfMethod(info.FullMethod), "success")
 	}
 	return resp, err
+}
+
+func requestParent(ctx context.Context) oteltrace.SpanContext {
+	md, _ := metadata.FromIncomingContext(ctx)
+	parents := md.Get("traceparent")
+	if len(parents) != 1 || len(parents[0]) > 512 {
+		return oteltrace.SpanContext{}
+	}
+	carrier := propagation.MapCarrier{"traceparent": parents[0]}
+	return oteltrace.SpanContextFromContext(
+		propagation.TraceContext{}.Extract(context.Background(), carrier),
+	)
 }
 
 func nameOfMethod(fullMethod string) string {

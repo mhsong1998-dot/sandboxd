@@ -402,9 +402,14 @@ func (r *Handler) resolveRootOverlay(limitBytes uint64) (string, string, error) 
 func (r *Handler) Delete(ctx context.Context, sandboxID string) error {
 	traceID, _ := trace.GetContextID(ctx)
 	start := time.Now()
-	if err := r.runsc.Delete(ctx, sandboxID, true); err != nil {
+	stage := trace.BeginDeleteStage(ctx)
+	err := r.runsc.Delete(ctx, sandboxID, true)
+	stage.End("runsc_command")
+	if err != nil {
 		return err
 	}
+	stage = trace.BeginDeleteStage(ctx)
+	defer stage.End("runsc_bundle_cleanup")
 	bundlePath, err := util.JoinWithinRoot(r.sandboxRoot, sandboxID)
 	if err != nil {
 		return fmt.Errorf("resolve runsc sandbox bundle: %w", err)

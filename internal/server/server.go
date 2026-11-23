@@ -274,7 +274,9 @@ func (h *sandboxService) deleteSandboxRuntime(ctx context.Context, sandboxID str
 		}
 	}()
 
+	stage := trace.BeginDeleteStage(ctx)
 	c, err := h.sandboxManager.Get(sandboxID)
+	stage.End("lookup")
 	if err != nil {
 		if errors.Is(err, errord.ErrNotFound) {
 			return nil
@@ -291,7 +293,9 @@ func (h *sandboxService) deleteSandboxRuntime(ctx context.Context, sandboxID str
 		return errord.ToGRPC(errord.ErrNotImplemented)
 	}
 
+	stage = trace.BeginDeleteStage(ctx)
 	resource, err := h.sandboxManager.CollectResourceByID(sandboxID)
+	stage.End("collect_resources")
 	if err != nil {
 		return err
 	}
@@ -300,13 +304,16 @@ func (h *sandboxService) deleteSandboxRuntime(ctx context.Context, sandboxID str
 	if h.cgroupMgr != nil {
 		killCgroup = h.cgroupMgr.Kill
 	}
+	stage = trace.BeginDeleteStage(ctx)
 	err = h.deleteRuntimeBounded(ctx, sandboxID, handler, resource, killCgroup)
+	stage.End("runtime_delete")
 	if err != nil && !errors.Is(err, errord.ErrNotFound) {
 		metrics.RecordRuntimeCallResult("delete", "failed", c.Metadata.RuntimeHandler)
 		logrus.WithField(trace.ContextKeyTraceId, traceID).Errorf("runtime handler force delete sandbox failed: %v", err)
 		return errord.ToGRPC(err)
 	}
 	metrics.RecordRuntimeCallResult("delete", "success", c.Metadata.RuntimeHandler)
+	stage = trace.BeginDeleteStage(ctx)
 	if h.resourceMod != nil {
 		h.resourceMod.ReleaseTransientMemory(
 			firecrackerCheckpointReservationOwner(sandboxID),
@@ -316,29 +323,45 @@ func (h *sandboxService) deleteSandboxRuntime(ctx context.Context, sandboxID str
 		h.xpuMgr.Release(sandboxID)
 	}
 
-	if err := h.deactivateStartNetwork(resource); err != nil {
+	stage.End("runtime_reservations")
+	stage = trace.BeginDeleteStage(ctx)
+	err = h.deactivateStartNetwork(resource)
+	stage.End("network_deactivate")
+	if err != nil {
 		return err
 	}
 
-	if err := h.fsMgr.Release(sandboxID); err != nil {
+	stage = trace.BeginDeleteStage(ctx)
+	err = h.fsMgr.Release(sandboxID)
+	stage.End("filesystem_release")
+	if err != nil {
 		return err
 	}
 	if h.aclMgr != nil {
+		stage = trace.BeginDeleteStage(ctx)
 		h.aclMu.Lock()
+		stage.End("acl_lock")
+		stage = trace.BeginDeleteStage(ctx)
 		aclErr := h.aclMgr.Remove(sandboxID)
 		h.aclMu.Unlock()
+		stage.End("acl_remove")
 		if aclErr != nil {
 			return fmt.Errorf("remove network ACL for sandbox %s: %w", sandboxID, aclErr)
 		}
 	}
-	if err := h.releaseStartResources(resource); err != nil {
+	if err := h.releaseStartResourcesWithContext(ctx, resource); err != nil {
 		return err
 	}
 
-	if err := h.releaseManagedSandbox(sandboxID, c.Metadata.Labels[managedOwnerLabel]); err != nil {
+	stage = trace.BeginDeleteStage(ctx)
+	err = h.releaseManagedSandbox(sandboxID, c.Metadata.Labels[managedOwnerLabel])
+	stage.End("release_ownership")
+	if err != nil {
 		return fmt.Errorf("release managed sandbox ownership: %w", err)
 	}
-	h.sandboxManager.Delete(sandboxID)
+	stage = trace.BeginDeleteStage(ctx)
+	h.sandboxManager.DeleteWithContext(ctx, sandboxID)
+	stage.End("manager_delete")
 	return nil
 }
 
@@ -359,10 +382,16 @@ func (h *sandboxService) deleteRuntimeBounded(ctx context.Context, id string, ha
 		return err
 	}
 	logrus.Warnf("runtime delete %s timed out; draining cgroup %s before retry", id, name)
-	if killErr := killCgroup(name); killErr != nil {
+	stage := trace.BeginDeleteStage(ctx)
+	killErr := killCgroup(name)
+	stage.End("cgroup_kill")
+	if killErr != nil {
 		return errors.Join(err, killErr)
 	}
-	return attempt()
+	stage = trace.BeginDeleteStage(ctx)
+	err = attempt()
+	stage.End("runtime_retry")
+	return err
 }
 
 func (h *sandboxService) deleteAttemptTimeout() time.Duration {
@@ -376,7 +405,11 @@ func (h *sandboxService) deleteAttemptTimeout() time.Duration {
 // Cleanup runs independently from the initiating caller's cancellation so a
 // timed-out RPC cannot leave a partially deleted sandbox for another caller to
 // release again.
-func (h *sandboxService) deleteSandbox(ctx context.Context, sandboxID string) error {
+func (h *sandboxService) deleteSandbox(ctx context.Context, sandboxID string) (err error) {
+	timing := trace.BeginDeleteRequest(ctx)
+	var cleanup *trace.DeleteCleanupTiming
+	var shared bool
+	defer func() { timing.Finish(cleanup, shared, err) }()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -390,14 +423,21 @@ func (h *sandboxService) deleteSandbox(ctx context.Context, sandboxID string) er
 		cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), budget)
 		defer cancelCleanup()
 
+		cleanupCtx, observed := trace.BeginDeleteCleanup(cleanupCtx, timing)
 		if h.networkMgr != nil {
+			stage := trace.BeginDeleteStage(cleanupCtx)
 			h.networkMgr.cleanupDnatRules(sandboxID)
+			stage.End("dnat_cleanup")
 		}
-		return nil, h.deleteSandboxRuntime(cleanupCtx, sandboxID)
+		err := h.deleteSandboxRuntime(cleanupCtx, sandboxID)
+		observed.Finish(err)
+		return observed, err
 	})
 
 	select {
 	case result := <-resultCh:
+		cleanup, _ = result.Val.(*trace.DeleteCleanupTiming)
+		shared = result.Shared
 		return result.Err
 	case <-waitCtx.Done():
 		if ctx.Err() == nil {

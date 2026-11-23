@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/inclusionAI/sandboxd/internal/metrics"
+	"github.com/inclusionAI/sandboxd/internal/trace"
 	"github.com/inclusionAI/sandboxd/internal/util"
 	cmap "github.com/orcaman/concurrent-map/v2"
 
@@ -898,9 +899,14 @@ func (m *Manager) CleanSandboxRoot(id string) {
 }
 
 func (m *Manager) Delete(id string) {
+	m.DeleteWithContext(context.Background(), id)
+}
+
+func (m *Manager) DeleteWithContext(ctx context.Context, id string) {
 	// Keep the ID reserved until root cleanup and exit notifications finish.
 	defer m.ReleaseID(id)
 
+	stage := trace.BeginDeleteStage(ctx)
 	if sb, ok := m.sandboxes.Get(id); ok {
 		// Publish retirement before unlinking children. A failed atomic rename
 		// can otherwise precede the final rmdir while housekeeping still sees
@@ -908,9 +914,12 @@ func (m *Manager) Delete(id string) {
 		sb.retiring.Store(true)
 		m.notifySandboxStopped(sb)
 	}
+	stage.End("manager_notify_stopped")
 
 	// clean root file.
+	stage = trace.BeginDeleteStage(ctx)
 	m.CleanSandboxRoot(id)
+	stage.End("sandbox_root_cleanup")
 
 	if !m.sandboxes.Has(id) {
 		return
