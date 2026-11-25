@@ -57,6 +57,7 @@ func (h *sandboxService) initStartRegistryLocked() error {
  if err != nil { return err }
  h.startFenceInstance = instance
  if h.startOperations == nil { h.startOperations = make(map[string]*startOperation) }
+ if h.startKeysByID == nil { h.startKeysByID = make(map[string]string) }
  return nil
 }
 
@@ -66,8 +67,9 @@ func validStartKey(key string) bool {
 
 // beginStart publishes the operation before any preparation can run. The finish
 // callback runs after Start's rollback defers, not when the client disconnects.
-func (h *sandboxService) beginStart(ctx context.Context, key string) (context.Context, func(), error) {
+func (h *sandboxService) beginStart(ctx context.Context, key, expectedInstance string) (context.Context, func(), error) {
 	if key == "" {
+  if expectedInstance != "" { return nil, nil, status.Error(codes.InvalidArgument, "start fence instance requires a start key") }
 		return ctx, func() {}, nil
 	}
 	if !validStartKey(key) {
@@ -76,6 +78,9 @@ func (h *sandboxService) beginStart(ctx context.Context, key string) (context.Co
 	h.startMu.Lock()
 	defer h.startMu.Unlock()
  if err := h.initStartRegistryLocked(); err != nil { return nil, nil, err }
+ if expectedInstance != "" && expectedInstance != h.startFenceInstance {
+  return nil, nil, status.Error(codes.FailedPrecondition, "start fence instance changed")
+ }
 	if op := h.startOperations[key]; op != nil {
 		return nil, nil, status.Error(codes.AlreadyExists, "start key is already used or fenced")
 	}
@@ -99,6 +104,7 @@ func (h *sandboxService) setStartSandbox(key, id string) {
 	h.startMu.Lock()
 	defer h.startMu.Unlock()
 	h.startOperations[key].sandboxID = id
+ h.startKeysByID[id] = key
 }
 
 // deleteStart installs a fence even when Delete arrives before Start. A client
@@ -172,7 +178,7 @@ func (h *sandboxService) deleteStart(ctx context.Context, req *runtime.DeleteReq
  if err := ctx.Err(); err != nil { return nil, status.FromContextError(err).Err() }
 	// The acknowledgement prevents an older server that ignores start_key from
 	// being mistaken for a server that fenced an unknown attempt.
-	if err := grpc.SetHeader(ctx, metadata.Pairs("sandboxd-start-fenced", "true", "sandboxd-start-fence-instance", instance)); err != nil {
+	if err := grpc.SetHeader(ctx, metadata.Pairs("sandboxd-start-fenced", "true", "sandboxd-start-fence-instance", instance, "sandboxd-start-fence-version", "2")); err != nil {
 		return nil, status.Error(codes.Internal, "cannot acknowledge start fence")
 	}
 	return &runtime.DeleteResponse{}, nil
@@ -187,8 +193,12 @@ func (h *sandboxService) setStartCleanup(key string, cleanup *startCleanup) {
  op := h.startOperations[key]
  op.cleanup = cleanup
  if cleanup == nil {
+  if h.startKeysByID[op.sandboxID] == key { delete(h.startKeysByID, op.sandboxID) }
   op.sandboxID = ""
   op.pending = nil
+ } else {
+  op.sandboxID = cleanup.id
+  h.startKeysByID[cleanup.id] = key
  }
 }
 
@@ -196,7 +206,8 @@ func (h *sandboxService) setStartCleanup(key string, cleanup *startCleanup) {
 // disappear between reading committed metadata and copying its pending status.
 func (h *sandboxService) pendingInventoryLocked(req *runtime.ListSandboxesRequest) []*runtime.SandboxStatus {
 	var result []*runtime.SandboxStatus
-	for _, op := range h.startOperations {
+	for _, key := range h.startKeysByID {
+  op := h.startOperations[key]
 		if (op.cancel == nil && op.cleanup == nil) || op.pending == nil || (req.ID != "" && req.ID != op.sandboxID) {
 			continue
 		}
@@ -228,10 +239,7 @@ func (h *sandboxService) setStartInventory(req *runtime.StartRequest) {
 func (h *sandboxService) activeStartKey(id string) string {
 	h.startMu.Lock()
 	defer h.startMu.Unlock()
-	for key, op := range h.startOperations {
-		if (op.cancel != nil || op.cleanup != nil) && op.sandboxID == id {
-			return key
-		}
-	}
+ key := h.startKeysByID[id]
+ if op := h.startOperations[key]; op != nil && (op.cancel != nil || op.cleanup != nil) && op.sandboxID == id { return key }
 	return ""
 }

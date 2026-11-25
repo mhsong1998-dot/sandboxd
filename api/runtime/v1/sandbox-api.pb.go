@@ -1419,6 +1419,10 @@ type StartRequest struct {
 	// Never reuse a key for another execution. Delete can fence a timed-out attempt.
 	// Keyed starts support only read-only local extra mounts; no S3 or restore.
 	StartKey      string `protobuf:"bytes,24,opt,name=start_key,json=startKey,proto3" json:"start_key,omitempty"`
+	// ExpectedStartFenceInstance binds a keyed Start to the probed daemon.
+	// A mismatched nonempty instance is rejected before any preparation.
+	// Empty preserves the process-lifetime-only keyed Start contract.
+	ExpectedStartFenceInstance string `protobuf:"bytes,25,opt,name=expected_start_fence_instance,json=expectedStartFenceInstance,proto3" json:"expected_start_fence_instance,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -1619,6 +1623,11 @@ func (x *StartRequest) GetStartKey() string {
 		return x.StartKey
 	}
 	return ""
+}
+
+func (x *StartRequest) GetExpectedStartFenceInstance() string {
+ if x != nil { return x.ExpectedStartFenceInstance }
+ return ""
 }
 
 // StartResponse is returned after sandbox start.
@@ -3063,7 +3072,7 @@ const file_api_runtime_v1_sandbox_api_proto_rawDesc = "" +
 	"\n" +
 	"device_ids\x18\x02 \x03(\rR\tdeviceIds\"7\n" +
 	"\x0eCheckpointInfo\x12%\n" +
-	"\x0echeckpoint_dir\x18\x01 \x01(\tR\rcheckpointDir\"\x8e\n\n" +
+	"\x0echeckpoint_dir\x18\x01 \x01(\tR\rcheckpointDir\"\xd1\x0a\n" +
 	"\fStartRequest\x12\x1d\n" +
 	"\n" +
 	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\x12\x1f\n" +
@@ -3091,7 +3100,7 @@ const file_api_runtime_v1_sandbox_api_proto_rawDesc = "" +
 	"\x0fcheckpoint_info\x18\x15 \x01(\v2\x1a.runtime.v1.CheckpointInfoR\x0echeckpointInfo\x12+\n" +
 	"\x11inject_entrypoint\x18\x16 \x01(\tR\x10injectEntrypoint\x12*\n" +
 	"\x11prefer_image_path\x18\x17 \x01(\bR\x0fpreferImagePath\x12\x1b\n" +
-	"\tstart_key\x18\x18 \x01(\tR\bstartKey\x1a7\n" +
+	"\tstart_key\x18\x18 \x01(\tR\bstartKey\x12A\x0a\x1dexpected_start_fence_instance\x18\x19 \x01(\x09R\x1aexpectedStartFenceInstance\x1a7\n" +
 	"\tEnvsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1a<\n" +

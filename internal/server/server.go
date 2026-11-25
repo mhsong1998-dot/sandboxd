@@ -78,6 +78,7 @@ type sandboxService struct {
 	startMu         sync.Mutex
 	startOperations map[string]*startOperation
  startFenceInstance string
+ startKeysByID map[string]string
 
 	// config is the sandbox service config
 	config         config.Config
@@ -1322,7 +1323,7 @@ func (h *sandboxService) Start(ctx context.Context, request *runtime.StartReques
 		return nil, status.Error(codes.InvalidArgument, "start key label is managed by sandboxd")
 	}
 	if err := validateKeyedStart(request); err != nil { return nil, err }
-	startCtx, finishStart, err := h.beginStart(ctx, request.StartKey)
+	startCtx, finishStart, err := h.beginStart(ctx, request.StartKey, request.ExpectedStartFenceInstance)
 	if err != nil {
 		return nil, err
 	}

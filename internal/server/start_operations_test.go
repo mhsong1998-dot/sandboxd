@@ -127,7 +127,7 @@ func checkBlockedStartCleanup(t *testing.T, physical bool) {
 func TestDeleteStartKeyWaitsForLateCompletionAndCanRetry(t *testing.T) {
 	handler := &recordingDeleteHandler{FakeRuntimeHandler: svc.NewFakeRuntimeHandler()}
 	s := newTestService(t, map[string]svc.Handler{"runsc": handler})
-	child, finish, err := s.beginStart(context.Background(), "slow-attempt")
+	child, finish, err := s.beginStart(context.Background(), "slow-attempt", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +185,7 @@ func TestDeleteStartKeyRecoversGeneratedIdentityAfterRestart(t *testing.T) {
 func TestDeleteStartKeyPreservesReusedPhysicalIdentity(t *testing.T) {
 	handler := &recordingDeleteHandler{FakeRuntimeHandler: svc.NewFakeRuntimeHandler()}
 	s := newTestService(t, map[string]svc.Handler{"runsc": handler})
-	_, finish, err := s.beginStart(context.Background(), "failed-attempt")
+	_, finish, err := s.beginStart(context.Background(), "failed-attempt", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -353,6 +353,7 @@ func TestDeleteStartKeyAcknowledgesProcessIncarnation(t *testing.T) {
   stream := &fenceHeaderStream{}
   ctx := grpc.NewContextWithServerTransportStream(context.Background(), stream)
   if _, err := s.Delete(ctx, &runtime.DeleteRequest{StartKey: key}); err != nil { t.Fatal(err) }
+  if got := stream.headers.Get("sandboxd-start-fence-version"); len(got) != 1 || got[0] != "2" { t.Fatalf("missing strong protocol version: %v", got) }
   values := stream.headers.Get("sandboxd-start-fence-instance")
   if len(values) != 1 || len(values[0]) != 32 { t.Fatalf("missing process incarnation: %v", values) }
   return values[0]
@@ -369,4 +370,21 @@ func (failedFenceEntropy) Read([]byte) (int, error) { return 0, errors.New("inje
 func TestStartKeyFenceEntropyFailureReturnsStructuredError(t *testing.T) {
  instance, err := newStartFenceInstance(failedFenceEntropy{})
  if instance != "" || status.Code(err) != codes.Internal { t.Fatalf("entropy failure must return Internal without a proof: %q %v", instance, err) }
+}
+
+func TestStartKeyRejectsPreparedProducerAfterDaemonReplacement(t *testing.T) {
+ old := newTestService(t, map[string]svc.Handler{config.RuntimeNameRunsc: svc.NewFakeRuntimeHandler()})
+ stream := &fenceHeaderStream{}
+ ctx := grpc.NewContextWithServerTransportStream(context.Background(), stream)
+ if _, err := old.Delete(ctx, &runtime.DeleteRequest{StartKey: "producer-attempt"}); err != nil { t.Fatal(err) }
+ expected := stream.headers.Get("sandboxd-start-fence-instance")[0]
+ replacement := newTestService(t, map[string]svc.Handler{config.RuntimeNameRunsc: svc.NewFakeRuntimeHandler()})
+ // Even a fully prepared producer carrying the old key cannot recreate the
+ // attempt after a new daemon loses the old process's terminal tombstone.
+ _, err := replacement.Start(context.Background(), &runtime.StartRequest{StartKey: "producer-attempt", ExpectedStartFenceInstance: expected})
+ if status.Code(err) != codes.FailedPrecondition { t.Fatalf("old producer was not rejected: %v", err) }
+ if len(replacement.startOperations) != 0 || len(replacement.startKeysByID) != 0 || len(replacement.fsMgr.rootfs.List()) != 0 { t.Fatal("mismatched instance acquired resources or published an operation") }
+ if _, finish, err := replacement.beginStart(context.Background(), "current-producer", replacement.startFenceInstance); err != nil { t.Fatal(err) } else { finish() }
+ // Missing expected instance keeps the explicitly weaker generic contract.
+ if _, finish, err := replacement.beginStart(context.Background(), "legacy-producer", ""); err != nil { t.Fatal(err) } else { finish() }
 }
