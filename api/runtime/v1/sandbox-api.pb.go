@@ -1417,7 +1417,7 @@ type StartRequest struct {
 	PreferImagePath bool `protobuf:"varint,23,opt,name=prefer_image_path,json=preferImagePath,proto3" json:"prefer_image_path,omitempty"`
 	// StartKey identifies one start attempt independently of the generated sandbox ID.
 	// Never reuse a key for another execution. Delete can fence a timed-out attempt.
-	// Keyed starts do not support extra mounts, S3, restore or managed profiles.
+	// Keyed starts support only read-only local extra mounts; no S3 or restore.
 	StartKey      string `protobuf:"bytes,24,opt,name=start_key,json=startKey,proto3" json:"start_key,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache

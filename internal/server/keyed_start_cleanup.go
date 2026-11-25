@@ -19,9 +19,11 @@ import (
  "errors"
  "fmt"
  "os"
+ "slices"
 
  runtime "github.com/inclusionAI/sandboxd/api/runtime/v1"
  "github.com/inclusionAI/sandboxd/pkg/errord"
+ "github.com/inclusionAI/sandboxd/config"
  "github.com/inclusionAI/sandboxd/pkg/networkmanager"
  "google.golang.org/grpc/codes"
  "google.golang.org/grpc/status"
@@ -38,6 +40,7 @@ type startCleanup struct {
  resources *preparedStartResources
  files *preparedSandboxFiles
  dnat, acl, xpu bool
+ quarantineEndpoint bool
  managedOwner string
  managedRollback func()
 }
@@ -48,8 +51,13 @@ func validateKeyedStart(req *runtime.StartRequest) error {
  if req.StartKey == "" { return nil }
  profile, err := managedProfileSelection(req)
  if err != nil { return err }
- if len(req.Mounts) != 0 || req.CheckpointInfo != nil || profile != "" || req.Rootfs.GetType() == runtime.RootfsSrcType_S3 {
-  return status.Error(codes.Unimplemented, "start-key retirement does not support mounts, S3, checkpoints or managed runtime profiles")
+ if req.CheckpointInfo != nil || profile != "" || req.Rootfs.GetType() == runtime.RootfsSrcType_S3 {
+  return status.Error(codes.Unimplemented, "start-key retirement does not support S3, checkpoints or managed runtime profiles")
+ }
+ for _, mount := range req.Mounts {
+  if mount.GetHostPath() == "" || !slices.Contains(mount.GetOptions(), "ro") || (mount.GetType() != "erofs" && mount.GetType() != "bind") {
+   return status.Error(codes.Unimplemented, "start-key retirement requires read-only local host mounts")
+  }
  }
  return nil
 }
@@ -78,6 +86,12 @@ func (h *sandboxService) cleanupStart(ctx context.Context, c *startCleanup) erro
   h.aclMu.Unlock()
   if err != nil { return fmt.Errorf("remove start ACL: %w", err) }
   c.acl = false
+ }
+ if c.quarantineEndpoint && c.resources != nil {
+  endpoint := c.resources.Resources[config.ResourceNameInterface]
+  if err := h.networkMgr.Discard(endpoint); err != nil { return fmt.Errorf("discard uncertain ACL endpoint: %w", err) }
+  delete(c.resources.Resources, config.ResourceNameInterface)
+  c.quarantineEndpoint = false
  }
  if c.fs != nil {
   if err := c.fs.releaseChecked(); err != nil { return err }
@@ -164,3 +178,28 @@ func (m *networkManager) cleanupDnatRulesChecked(id string) error {
  return nil
 }
 
+
+// Record each attempted DNAT rule before setup. An error may follow a partial
+// backend mutation; keyed rollback must retain a retryable cleanup identity.
+func (m *networkManager) setupDnatRulesOwned(id string, ports []string, targetIP string) error {
+ nat, ok := networkmanager.NetworkManagers[m.natBackend]
+ if !ok { return fmt.Errorf("network manager %s unavailable", m.natBackend) }
+ var local networkmanager.LocalDNATManager
+ if m.enableLocalDNAT {
+  var ok bool
+  local, ok = nat.(networkmanager.LocalDNATManager)
+  if !ok { return fmt.Errorf("network manager %s does not support local DNAT", m.natBackend) }
+ }
+ for _, port := range ports {
+  rule, err := parseDnatRule(id, port, targetIP)
+  if err != nil { return err }
+  m.dnatMu.Lock()
+  m.dnatRules[id] = append(m.dnatRules[id], rule)
+  m.dnatMu.Unlock()
+  if err := nat.SetupDNATRule(rule.Protocol, rule.DstPort, rule.TargetIP, rule.TargetPort); err != nil { return err }
+  if local != nil {
+   if err := local.SetupLocalDNATRule(rule.Protocol, rule.DstPort, rule.TargetIP, rule.TargetPort); err != nil { return err }
+  }
+ }
+ return nil
+}

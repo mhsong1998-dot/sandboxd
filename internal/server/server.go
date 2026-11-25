@@ -1581,7 +1581,7 @@ func (h *sandboxService) Start(ctx context.Context, request *runtime.StartReques
   if startReq.StartKey != "" {
    cleanup := &startCleanup{id: sandboxID, runtimeName: startReq.Runtime, native: runtimeAttempted,
     fs: preparedFilesystem, fsCommitted: filesystemCommitted, resources: preparedResources, files: sandboxFiles,
-    dnat: dnatConfigured, acl: aclAttempted, xpu: xpuAcquired, managedOwner: owner}
+    dnat: dnatConfigured, acl: aclAttempted, xpu: xpuAcquired, managedOwner: owner, quarantineEndpoint: aclAttempted && !aclRegistered}
    if !startSucceeded {
     cleanup.managedRollback = managedRollback
     managedRollback = nil
@@ -1822,13 +1822,16 @@ func (h *sandboxService) Start(ctx context.Context, request *runtime.StartReques
 
 	// If Ports are specified, set up DNAT rules using sandbox IP from startSandboxRuntime.
 	if len(startReq.Ports) > 0 {
+  if startReq.StartKey != "" { dnatConfigured = true }
 		if preparedResources.sandboxIP == "" {
 			return &runtime.StartResponse{
 				Code:    -1,
 				Message: "Failed to get sandbox IP for DNAT",
 			}, errors.New("sandbox IP not available")
 		}
-		if err := h.networkMgr.setupDnatRules(sandboxID, startReq.Ports, preparedResources.sandboxIP); err != nil {
+  setupDNAT := h.networkMgr.setupDnatRules
+  if startReq.StartKey != "" { setupDNAT = h.networkMgr.setupDnatRulesOwned }
+		if err := setupDNAT(sandboxID, startReq.Ports, preparedResources.sandboxIP); err != nil {
 			return &runtime.StartResponse{
 				Code:    -1,
 				Message: fmt.Sprintf("Failed to setup DNAT rules: %v", err),

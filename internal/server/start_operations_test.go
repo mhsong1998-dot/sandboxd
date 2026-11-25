@@ -322,3 +322,12 @@ func TestStartKeyRejectsUnsupportedPreparationBeforeAcquisition(t *testing.T) {
  }
  if len(s.startOperations) != 0 || len(s.fsMgr.rootfs.List()) != 0 { t.Fatal("unsupported preparation acquired ownership") }
 }
+
+func TestStartKeyAllowsReadOnlyLocalBootstrapMounts(t *testing.T) {
+ for _, typ := range []string{"erofs", "bind"} {
+  req := &runtime.StartRequest{StartKey: "bootstrap-"+typ, Mounts: []*runtime.Mount{{
+   Type: typ, Target: "/__adx", Options: []string{"ro", "rbind"}, Source: &runtime.Mount_HostPath{HostPath: "/opt/bootstrap"},
+  }}}
+  if err := validateKeyedStart(req); err != nil { t.Fatalf("deployment bootstrap was rejected: %v", err) }
+ }
+}

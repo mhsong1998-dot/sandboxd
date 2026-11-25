@@ -277,7 +277,7 @@ message StartRequest {
   bool prefer_image_path = 23;
   // StartKey identifies one start attempt independently of the generated sandbox ID.
   // Never reuse a key for another execution. Delete can fence a timed-out attempt.
-  // Keyed starts do not support extra mounts, S3, restore or managed profiles.
+  // Keyed starts support only read-only local extra mounts; no S3 or restore.
   string start_key = 24;
 }
 
