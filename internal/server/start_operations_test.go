@@ -331,3 +331,16 @@ func TestStartKeyAllowsReadOnlyLocalBootstrapMounts(t *testing.T) {
   if err := validateKeyedStart(req); err != nil { t.Fatalf("deployment bootstrap was rejected: %v", err) }
  }
 }
+
+func TestStartKeyDnatFailureRetainsAttemptedRulesForCleanupRetry(t *testing.T) {
+ fake := &fakeNetworkManager{failNext: true}
+ s := newDnatTestService(t, fake)
+ const id = "sbox-keyed-dnat"
+ if err := s.networkMgr.setupDnatRulesOwned(id, []string{"tcp:8080:80"}, "10.0.0.2"); err == nil { t.Fatal("injected setup failure did not occur") }
+ if len(s.networkMgr.rulesFor(id)) != 1 { t.Fatal("attempted rule was forgotten after setup failure") }
+ fake.failNext = true
+ if err := s.networkMgr.cleanupDnatRulesChecked(id); err == nil { t.Fatal("injected cleanup failure did not occur") }
+ if len(s.networkMgr.rulesFor(id)) != 1 { t.Fatal("failed cleanup lost the attempted rule") }
+ if err := s.networkMgr.cleanupDnatRulesChecked(id); err != nil { t.Fatal(err) }
+ if len(s.networkMgr.rulesFor(id)) != 0 { t.Fatal("successful cleanup did not consume the attempted rule") }
+}

@@ -23,6 +23,7 @@ import (
 
  runtime "github.com/inclusionAI/sandboxd/api/runtime/v1"
  "github.com/inclusionAI/sandboxd/pkg/errord"
+ "github.com/inclusionAI/sandboxd/pkg/sandbox"
  "github.com/inclusionAI/sandboxd/config"
  "github.com/inclusionAI/sandboxd/pkg/networkmanager"
  "google.golang.org/grpc/codes"
@@ -67,7 +68,11 @@ func (h *sandboxService) cleanupStart(ctx context.Context, c *startCleanup) erro
  if c.native {
   handler, ok := h.serviceHandler.Get(c.runtimeName)
   if !ok { return status.Error(codes.Unavailable, "start runtime handler is unavailable") }
-  if err := handler.Delete(ctx, c.id); err != nil && !errors.Is(err, errord.ErrNotFound) { return fmt.Errorf("delete unretired start runtime: %w", err) }
+  resource := sandbox.OccupiedResource{ID: c.id}
+  if c.resources != nil { resource = c.resources.OccupiedResource }
+  var killCgroup func(string) error
+  if h.cgroupMgr != nil { killCgroup = h.cgroupMgr.Kill }
+  if err := h.deleteRuntimeBounded(ctx, c.id, handler, resource, killCgroup); err != nil && !errors.Is(err, errord.ErrNotFound) { return fmt.Errorf("delete unretired start runtime: %w", err) }
   c.native = false
   if h.resourceMod != nil { h.resourceMod.ReleaseTransientMemory(firecrackerCheckpointReservationOwner(c.id)) }
  }
