@@ -16,6 +16,12 @@ package server
 
 import (
 	"context"
+	"errors"
+	"net"
+	"sync"
+	"strings"
+
+	gomonkey "github.com/agiledragon/gomonkey/v2"
 	"testing"
 	"time"
 
@@ -24,9 +30,12 @@ import (
 	"github.com/inclusionAI/sandboxd/internal/testregistry"
 	imageapi "github.com/inclusionAI/sandboxd/pkg/imagemanager/api"
 	"github.com/inclusionAI/sandboxd/pkg/imagemanager/oci"
+	"github.com/inclusionAI/sandboxd/pkg/networkmanager"
+	"github.com/inclusionAI/sandboxd/pkg/sandbox"
 	svc "github.com/inclusionAI/sandboxd/pkg/runtime"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
@@ -189,4 +198,79 @@ func TestDeleteStartKeyPreservesReusedPhysicalIdentity(t *testing.T) {
 	if status.Code(err) != codes.FailedPrecondition || handler.calls != 0 {
 		t.Fatalf("reused identity was not preserved: %v", err)
 	}
+}
+
+// A native runtime exists before metadata publication. Its failed rollback must
+// remain owned by the exact attempt, even though ordinary inventory is empty.
+type failedRollbackHandler struct {
+ *svc.FakeRuntimeHandler
+ mu sync.Mutex
+ native string
+ failDelete bool
+ deletes int
+}
+
+func (h *failedRollbackHandler) Start(_ context.Context, cfg svc.StartConfig) error {
+ h.mu.Lock()
+ defer h.mu.Unlock()
+ h.native = cfg.ID
+ return nil
+}
+
+func (h *failedRollbackHandler) Delete(_ context.Context, id string) error {
+ h.mu.Lock()
+ defer h.mu.Unlock()
+ h.deletes++
+ if h.failDelete { return errors.New("injected native delete failure") }
+ if h.native != id { return errors.New("wrong native identity") }
+ h.native = ""
+ return nil
+}
+
+type fenceHeaderStream struct {
+ startFailureStream
+ headers metadata.MD
+}
+
+func (s *fenceHeaderStream) SetHeader(md metadata.MD) error {
+ s.headers = metadata.Join(s.headers, md)
+ return nil
+}
+
+func TestDeleteStartKeyRetainsFailedNativeRollbackUntilRetry(t *testing.T) {
+ handler := &failedRollbackHandler{FakeRuntimeHandler: svc.NewFakeRuntimeHandler(), failDelete: true}
+ s := newTestService(t, map[string]svc.Handler{config.RuntimeNameRunsc: handler})
+ // Avoid host network/cgroup mutation while exercising the real Start rollback.
+ patch := gomonkey.ApplyPrivateMethod(s, "prepareStartResources", func(_ *sandboxService, _, id string) (*preparedStartResources, error) {
+  return &preparedStartResources{OccupiedResource: sandbox.OccupiedResource{ID: id, Resources: map[string]string{}}, network: &networkmanager.NetResource{Ip: net.ParseIP("10.0.0.2")}}, nil
+ })
+ defer patch.Reset()
+ const id = "sbox-failed-native-rollback"
+ const key = "failed-native-rollback"
+ _, err := s.Start(context.Background(), &runtime.StartRequest{
+  SandboxID: id, StartKey: key, Runtime: config.RuntimeNameRunsc,
+  Rootfs: &runtime.RootfsConfig{Type: runtime.RootfsSrcType_LOCAL, Source: &runtime.RootfsConfig_Path{Path: t.TempDir()}},
+  Ports: []string{"8080:80"},
+ })
+ if err == nil || !strings.Contains(err.Error(), "sandbox IP not available") { t.Fatalf("post-start failure not reached: %v", err) }
+ if handler.native != id || handler.deletes != 1 { t.Fatalf("native rollback was not attempted: %+v", handler) }
+ if _, err := s.sandboxManager.Get(id); err == nil { t.Fatal("test must fail before metadata publication") }
+ stream := &fenceHeaderStream{}
+ ctx := grpc.NewContextWithServerTransportStream(context.Background(), stream)
+ if _, err = s.Delete(ctx, &runtime.DeleteRequest{StartKey: key}); err == nil { t.Error("key Delete acknowledged failed native cleanup") }
+ if len(stream.headers.Get("sandboxd-start-fenced")) != 0 { t.Error("failed cleanup sent fence acknowledgement") }
+ if _, err := s.sandboxManager.ReserveID(id); err == nil { t.Error("failed native cleanup released its physical identity"); s.sandboxManager.ReleaseID(id) }
+ if len(s.fsMgr.rootfs.List()) != 1 { t.Error("failed native cleanup released rootfs ownership") }
+ handler.failDelete = false
+ stream = &fenceHeaderStream{}
+ ctx = grpc.NewContextWithServerTransportStream(context.Background(), stream)
+ if _, err = s.Delete(ctx, &runtime.DeleteRequest{StartKey: key}); err != nil { t.Fatal(err) }
+ if got := stream.headers.Get("sandboxd-start-fenced"); len(got) != 1 || got[0] != "true" { t.Fatal("successful retry did not acknowledge fence") }
+ if handler.native != "" || handler.deletes != 3 || len(s.fsMgr.rootfs.List()) != 0 { t.Fatalf("cleanup remains: native=%s deletes=%d rootfs=%d", handler.native, handler.deletes, len(s.fsMgr.rootfs.List())) }
+ if _, err := s.sandboxManager.ReserveID(id); err != nil { t.Fatalf("successful cleanup did not release ID: %v", err) }
+ // A later execution can reuse the physical identity. Retrying the old key
+ // must never route deletion to the new runtime.
+ storeSandboxForDelete(t, s, id)
+ _, _ = s.Delete(fenceContext(), &runtime.DeleteRequest{StartKey: key})
+ if handler.deletes != 3 { t.Fatal("old fence deleted a reused physical identity") }
 }
