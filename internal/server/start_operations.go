@@ -20,9 +20,9 @@ import (
 	"encoding/hex"
 	"io"
 	"strings"
- "unsafe"
+	"unsafe"
 
- "github.com/inclusionAI/sandboxd/internal/metrics"
+	"github.com/inclusionAI/sandboxd/internal/metrics"
 
 	runtime "github.com/inclusionAI/sandboxd/api/runtime/v1"
 	"github.com/inclusionAI/sandboxd/pkg/sandbox"
@@ -46,35 +46,39 @@ type startOperation struct {
 // All retired keys share this immutable object. The map retains every key, but
 // no per-key completion/cleanup channels survive confirmed retirement.
 var terminalStartOperation = func() *startOperation {
- done := make(chan struct{})
- close(done)
- return &startOperation{done: done}
+	done := make(chan struct{})
+	close(done)
+	return &startOperation{done: done}
 }()
 
 func (h *sandboxService) recordStartRegistryLocked() {
- active := uint64(len(h.startOperations)) - h.startTerminalKeys
- metrics.RecordResourceGauge("start_keys_active", float64(active))
- metrics.RecordResourceGauge("start_keys_terminal", float64(h.startTerminalKeys))
- metrics.RecordResourceGauge("start_key_bytes", float64(h.startKeyBytes))
- // A lower bound, not a heap measurement: excludes map capacity, channels,
- // pending/cleanup payloads, string headers and in-flight reader references.
- metrics.RecordResourceGauge("start_operation_struct_bytes", float64((active+1)*uint64(unsafe.Sizeof(startOperation{}))))
+	active := uint64(len(h.startOperations)) - h.startTerminalKeys
+	metrics.RecordResourceGauge("start_keys_active", float64(active))
+	metrics.RecordResourceGauge("start_keys_terminal", float64(h.startTerminalKeys))
+	metrics.RecordResourceGauge("start_key_bytes", float64(h.startKeyBytes))
+	// A lower bound, not a heap measurement: excludes map capacity, channels,
+	// pending/cleanup payloads, string headers and in-flight reader references.
+	metrics.RecordResourceGauge("start_operation_struct_bytes", float64((active+1)*uint64(unsafe.Sizeof(startOperation{}))))
 }
 
 func (h *sandboxService) insertStartOperationLocked(key string, op *startOperation) {
- h.startOperations[key] = op
- h.startKeyBytes += uint64(len(key))
- h.recordStartRegistryLocked()
+	h.startOperations[key] = op
+	h.startKeyBytes += uint64(len(key))
+	h.recordStartRegistryLocked()
 }
 
 func (h *sandboxService) compactStartOperationLocked(key string, op *startOperation) {
- if h.startOperations[key] != op || op == terminalStartOperation || op.cancel != nil || op.cleanup != nil || op.sandboxID != "" { return }
- if h.startKeysByID[op.sandboxID] == key { delete(h.startKeysByID, op.sandboxID) }
- op.sandboxID = ""
- op.pending = nil
- h.startOperations[key] = terminalStartOperation
- h.startTerminalKeys++
- h.recordStartRegistryLocked()
+	if h.startOperations[key] != op || op == terminalStartOperation || op.cancel != nil || op.cleanup != nil || op.sandboxID != "" {
+		return
+	}
+	if h.startKeysByID[op.sandboxID] == key {
+		delete(h.startKeysByID, op.sandboxID)
+	}
+	op.sandboxID = ""
+	op.pending = nil
+	h.startOperations[key] = terminalStartOperation
+	h.startTerminalKeys++
+	h.recordStartRegistryLocked()
 }
 
 // A fresh registry carries a fresh process incarnation. An acknowledgement from
@@ -143,7 +147,7 @@ func (h *sandboxService) beginStart(ctx context.Context, key, expectedInstance s
 			op.pending = nil
 		}
 		close(op.done)
-  h.compactStartOperationLocked(key, op)
+		h.compactStartOperationLocked(key, op)
 		h.startMu.Unlock()
 	}, nil
 }
@@ -161,14 +165,22 @@ func (h *sandboxService) setStartSandbox(key, id string) {
 // A guarded one-call ID Delete must reject a replaced daemon before touching
 // its physical ID. Comparing only the response nonce would be too late.
 func (h *sandboxService) checkDeleteFenceInstance(ctx context.Context) error {
- values := metadata.ValueFromIncomingContext(ctx, "sandboxd-expected-start-fence-instance")
- if len(values) == 0 { return nil }
- if len(values) != 1 || values[0] == "" { return status.Error(codes.InvalidArgument, "delete fence instance requires one nonempty value") }
- h.startMu.Lock()
- defer h.startMu.Unlock()
- if err := h.initStartRegistryLocked(); err != nil { return err }
- if values[0] != h.startFenceInstance { return status.Error(codes.FailedPrecondition, "start fence instance changed before delete") }
- return nil
+	values := metadata.ValueFromIncomingContext(ctx, "sandboxd-expected-start-fence-instance")
+	if len(values) == 0 {
+		return nil
+	}
+	if len(values) != 1 || values[0] == "" {
+		return status.Error(codes.InvalidArgument, "delete fence instance requires one nonempty value")
+	}
+	h.startMu.Lock()
+	defer h.startMu.Unlock()
+	if err := h.initStartRegistryLocked(); err != nil {
+		return err
+	}
+	if values[0] != h.startFenceInstance {
+		return status.Error(codes.FailedPrecondition, "start fence instance changed before delete")
+	}
+	return nil
 }
 
 // deleteStart installs a fence even when Delete arrives before Start. A client
@@ -188,10 +200,10 @@ func (h *sandboxService) deleteStart(ctx context.Context, req *runtime.DeleteReq
 	}
 	instance := h.startFenceInstance
 	op := h.startOperations[req.StartKey]
- if op == terminalStartOperation {
-  h.startMu.Unlock()
-  return acknowledgeStartFence(ctx, instance)
- }
+	if op == terminalStartOperation {
+		h.startMu.Unlock()
+		return acknowledgeStartFence(ctx, instance)
+	}
 	if op == nil {
 		op = &startOperation{done: make(chan struct{}), cleanupGate: make(chan struct{}, 1)}
 		close(op.done)
@@ -263,12 +275,14 @@ func (h *sandboxService) deleteStart(ctx context.Context, req *runtime.DeleteReq
 	if err := ctx.Err(); err != nil {
 		return nil, status.FromContextError(err).Err()
 	}
- h.setStartCleanup(req.StartKey, nil)
- return acknowledgeStartFence(ctx, instance)
+	h.setStartCleanup(req.StartKey, nil)
+	return acknowledgeStartFence(ctx, instance)
 }
 
 func acknowledgeStartFence(ctx context.Context, instance string) (*runtime.DeleteResponse, error) {
- if err := ctx.Err(); err != nil { return nil, status.FromContextError(err).Err() }
+	if err := ctx.Err(); err != nil {
+		return nil, status.FromContextError(err).Err()
+	}
 	// The acknowledgement prevents an older server that ignores start_key from
 	// being mistaken for a server that fenced an unknown attempt.
 	if err := grpc.SetHeader(ctx, metadata.Pairs("sandboxd-start-fenced", "true", "sandboxd-start-fence-instance", instance, "sandboxd-start-fence-version", "3")); err != nil {
@@ -284,7 +298,9 @@ func (h *sandboxService) setStartCleanup(key string, cleanup *startCleanup) {
 	h.startMu.Lock()
 	defer h.startMu.Unlock()
 	op := h.startOperations[key]
- if op == terminalStartOperation { return }
+	if op == terminalStartOperation {
+		return
+	}
 	op.cleanup = cleanup
 	if cleanup == nil {
 		if h.startKeysByID[op.sandboxID] == key {
@@ -292,7 +308,7 @@ func (h *sandboxService) setStartCleanup(key string, cleanup *startCleanup) {
 		}
 		op.sandboxID = ""
 		op.pending = nil
-  h.compactStartOperationLocked(key, op)
+		h.compactStartOperationLocked(key, op)
 	} else {
 		op.sandboxID = cleanup.id
 		h.startKeysByID[cleanup.id] = key
@@ -303,12 +319,14 @@ func (h *sandboxService) setStartCleanup(key string, cleanup *startCleanup) {
 // caller filters and copies them after releasing startMu. Clearing op.pending
 // or compacting its operation never changes an already retained record.
 func (h *sandboxService) pendingInventoryReferencesLocked() []*runtime.SandboxStatus {
- result := make([]*runtime.SandboxStatus, 0, len(h.startKeysByID))
- for _, key := range h.startKeysByID {
-  op := h.startOperations[key]
-  if (op.cancel != nil || op.cleanup != nil) && op.pending != nil { result = append(result, op.pending) }
- }
- return result
+	result := make([]*runtime.SandboxStatus, 0, len(h.startKeysByID))
+	for _, key := range h.startKeysByID {
+		op := h.startOperations[key]
+		if (op.cancel != nil || op.cleanup != nil) && op.pending != nil {
+			result = append(result, op.pending)
+		}
+	}
+	return result
 }
 
 func (h *sandboxService) setStartInventory(req *runtime.StartRequest) {

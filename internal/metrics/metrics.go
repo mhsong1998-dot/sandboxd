@@ -15,8 +15,8 @@
 package metrics
 
 import (
- "time"
- "github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus"
+	"time"
 )
 
 // register metrics
@@ -26,17 +26,17 @@ func init() {
 	prometheus.MustRegister(ResourceGauge)
 	prometheus.MustRegister(RuntimeCallResultCounter)
 	prometheus.MustRegister(GcQueueLengthGauge)
- prometheus.MustRegister(ListSnapshotLockSeconds)
+	prometheus.MustRegister(ListSnapshotLockSeconds)
 }
 
 var (
- ListSnapshotLockSeconds = prometheus.NewHistogramVec(
-  prometheus.HistogramOpts{
-   Namespace: "sandbox", Subsystem: "internal", Name: "list_snapshot_lock_seconds",
-   Help: "Time waiting for or holding the start registry lock while capturing a List snapshot.",
-   Buckets: []float64{0.00001, 0.0001, 0.001, 0.01, 0.1, 1},
-  }, []string{"phase"},
- )
+	ListSnapshotLockSeconds = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: "sandbox", Subsystem: "internal", Name: "list_snapshot_lock_seconds",
+			Help:    "Time waiting for or holding the start registry lock while capturing a List snapshot.",
+			Buckets: []float64{0.00001, 0.0001, 0.001, 0.01, 0.1, 1},
+		}, []string{"phase"},
+	)
 
 	ActionLatencyMsHis = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
@@ -110,5 +110,5 @@ func RecordGcQueueLength(resourceType string, value float64) {
 }
 
 func RecordListSnapshotLock(phase string, elapsed time.Duration) {
- ListSnapshotLockSeconds.WithLabelValues(phase).Observe(elapsed.Seconds())
+	ListSnapshotLockSeconds.WithLabelValues(phase).Observe(elapsed.Seconds())
 }

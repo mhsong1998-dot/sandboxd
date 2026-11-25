@@ -79,8 +79,8 @@ type sandboxService struct {
 	startOperations    map[string]*startOperation
 	startFenceInstance string
 	startKeysByID      map[string]string
- startTerminalKeys uint64
- startKeyBytes uint64
+	startTerminalKeys  uint64
+	startKeyBytes      uint64
 
 	// config is the sandbox service config
 	config         config.Config
@@ -478,63 +478,75 @@ func (h *sandboxService) deleteSandbox(ctx context.Context, sandboxID string) (e
 // listSandboxReference keeps immutable metadata and the status store's own
 // synchronization available after the start registry's short snapshot lock.
 type listSandboxReference struct {
- metadata *runtime.SandboxMetadata
- status sandbox.StatusStorage
+	metadata *runtime.SandboxMetadata
+	status   sandbox.StatusStorage
 }
 
 func (h *sandboxService) List(ctx context.Context, request *runtime.ListSandboxesRequest) (*runtime.ListSandboxesResponse, error) {
- waiting := time.Now()
- h.startMu.Lock()
- locked := time.Now()
- var sandboxes []*sandbox.Sandbox
- if request.ID != "" {
-  if current, err := h.sandboxManager.Get(request.ID); err == nil { sandboxes = []*sandbox.Sandbox{current} }
- } else {
-  sandboxes = h.sandboxManager.List()
- }
- committed := make([]listSandboxReference, 0, len(sandboxes))
- for _, current := range sandboxes {
-  if current != nil && current.Metadata != nil && current.Status != nil {
-   committed = append(committed, listSandboxReference{metadata: current.Metadata, status: current.Status})
-  }
- }
- pending := h.pendingInventoryReferencesLocked()
- h.startMu.Unlock()
- unlocked := time.Now()
- metrics.RecordListSnapshotLock("wait", locked.Sub(waiting))
- metrics.RecordListSnapshotLock("hold", unlocked.Sub(locked))
+	waiting := time.Now()
+	h.startMu.Lock()
+	locked := time.Now()
+	var sandboxes []*sandbox.Sandbox
+	if request.ID != "" {
+		if current, err := h.sandboxManager.Get(request.ID); err == nil {
+			sandboxes = []*sandbox.Sandbox{current}
+		}
+	} else {
+		sandboxes = h.sandboxManager.List()
+	}
+	committed := make([]listSandboxReference, 0, len(sandboxes))
+	for _, current := range sandboxes {
+		if current != nil && current.Metadata != nil && current.Status != nil {
+			committed = append(committed, listSandboxReference{metadata: current.Metadata, status: current.Status})
+		}
+	}
+	pending := h.pendingInventoryReferencesLocked()
+	h.startMu.Unlock()
+	unlocked := time.Now()
+	metrics.RecordListSnapshotLock("wait", locked.Sub(waiting))
+	metrics.RecordListSnapshotLock("hold", unlocked.Sub(locked))
 
- response := &runtime.ListSandboxesResponse{}
- seen := make(map[string]bool, len(committed))
- for _, current := range committed {
-  if !listIdentityMatches(request, current.metadata.ID, current.metadata.Labels) { continue }
-  state := current.status.Get()
-  response.Sandboxes = append(response.Sandboxes, &runtime.SandboxStatus{
-   ID: current.metadata.ID, Runtime: current.metadata.RuntimeHandler, State: state.State(),
-   StartedAt: util.MustInt64(state.StartedAt), FinishedAt: util.MustInt64(state.FinishedAt), ExitCode: state.ExitCode,
-   Labels: copyStringMap(current.metadata.Labels), MetricLabels: copyStringMap(current.metadata.MetricLabels),
-   Stdout: current.metadata.Stdout, Stderr: current.metadata.Stderr,
-  })
-  seen[current.metadata.ID] = true
- }
- for _, current := range pending {
-  if seen[current.ID] || !listIdentityMatches(request, current.ID, current.Labels) { continue }
-  response.Sandboxes = append(response.Sandboxes, &runtime.SandboxStatus{
-   ID: current.ID, Runtime: current.Runtime, State: runtime.SandboxState_SANDBOX_STATE_UNKNOWN,
-   Labels: copyStringMap(current.Labels), MetricLabels: copyStringMap(current.MetricLabels),
-   Stdout: current.Stdout, Stderr: current.Stderr,
-  })
- }
- if request.ID != "" && len(response.Sandboxes) == 0 { return response, errord.ToGRPC(errord.ErrNotFound) }
- return response, nil
+	response := &runtime.ListSandboxesResponse{}
+	seen := make(map[string]bool, len(committed))
+	for _, current := range committed {
+		if !listIdentityMatches(request, current.metadata.ID, current.metadata.Labels) {
+			continue
+		}
+		state := current.status.Get()
+		response.Sandboxes = append(response.Sandboxes, &runtime.SandboxStatus{
+			ID: current.metadata.ID, Runtime: current.metadata.RuntimeHandler, State: state.State(),
+			StartedAt: util.MustInt64(state.StartedAt), FinishedAt: util.MustInt64(state.FinishedAt), ExitCode: state.ExitCode,
+			Labels: copyStringMap(current.metadata.Labels), MetricLabels: copyStringMap(current.metadata.MetricLabels),
+			Stdout: current.metadata.Stdout, Stderr: current.metadata.Stderr,
+		})
+		seen[current.metadata.ID] = true
+	}
+	for _, current := range pending {
+		if seen[current.ID] || !listIdentityMatches(request, current.ID, current.Labels) {
+			continue
+		}
+		response.Sandboxes = append(response.Sandboxes, &runtime.SandboxStatus{
+			ID: current.ID, Runtime: current.Runtime, State: runtime.SandboxState_SANDBOX_STATE_UNKNOWN,
+			Labels: copyStringMap(current.Labels), MetricLabels: copyStringMap(current.MetricLabels),
+			Stdout: current.Stdout, Stderr: current.Stderr,
+		})
+	}
+	if request.ID != "" && len(response.Sandboxes) == 0 {
+		return response, errord.ToGRPC(errord.ErrNotFound)
+	}
+	return response, nil
 }
 
 func listIdentityMatches(request *runtime.ListSandboxesRequest, id string, labels map[string]string) bool {
- if request.ID != "" { return request.ID == id }
- for key, value := range request.Selector {
-  if labels[key] != value { return false }
- }
- return true
+	if request.ID != "" {
+		return request.ID == id
+	}
+	for key, value := range request.Selector {
+		if labels[key] != value {
+			return false
+		}
+	}
+	return true
 }
 
 func (h *sandboxService) Stats(ctx context.Context, request *runtime.StatsRequest) (*runtime.StatsResponse, error) {
@@ -1186,7 +1198,9 @@ func validateRuntimeFilestore(runtimeConfig config.RuntimeConfig) error {
 }
 
 func (h *sandboxService) Delete(ctx context.Context, request *runtime.DeleteRequest) (response *runtime.DeleteResponse, err error) {
- if err := h.checkDeleteFenceInstance(ctx); err != nil { return nil, err }
+	if err := h.checkDeleteFenceInstance(ctx); err != nil {
+		return nil, err
+	}
 	if request != nil && request.StartKey != "" {
 		return h.deleteStart(ctx, request)
 	}
