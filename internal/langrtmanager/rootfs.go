@@ -245,16 +245,20 @@ func (rf *RootFS) DecRef() {
 // ReleaseChecked releases one owner only after final unmount succeeds. Failed
 // final releases retain their reference so the same owner can retry safely.
 func (rf *RootFS) ReleaseChecked() error {
- rf.mu.Lock()
- defer rf.mu.Unlock()
- if rf.refcnt <= 0 { return fmt.Errorf("rootfs has no owned reference") }
- if rf.refcnt == 1 {
-  if err := rf.UmountImage(); err != nil { return err }
-  rf.deleted = true
-  rf.cleanupFunc()
- }
- rf.refcnt--
- return nil
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.refcnt <= 0 {
+		return fmt.Errorf("rootfs has no owned reference")
+	}
+	if rf.refcnt == 1 {
+		if err := rf.UmountImage(); err != nil {
+			return err
+		}
+		rf.deleted = true
+		rf.cleanupFunc()
+	}
+	rf.refcnt--
+	return nil
 }
 
 func NewRootFS(cfg RootfsConfig, mounter ImageMounter, cleanup func()) (*RootFS, error) {

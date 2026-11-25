@@ -75,10 +75,10 @@ var _ SandboxService = &sandboxService{}
 
 // sandboxService implements SandboxService.
 type sandboxService struct {
-	startMu         sync.Mutex
-	startOperations map[string]*startOperation
- startFenceInstance string
- startKeysByID map[string]string
+	startMu            sync.Mutex
+	startOperations    map[string]*startOperation
+	startFenceInstance string
+	startKeysByID      map[string]string
 
 	// config is the sandbox service config
 	config         config.Config
@@ -1152,9 +1152,11 @@ func (h *sandboxService) Delete(ctx context.Context, request *runtime.DeleteRequ
 		if key := h.activeStartKey(request.ID); key != "" {
 			return h.deleteStart(ctx, &runtime.DeleteRequest{StartKey: key})
 		}
-  if current, getErr := h.sandboxManager.Get(request.ID); getErr == nil && current.Metadata != nil {
-   if key := current.Metadata.Labels[startKeyLabel]; key != "" { return h.deleteStart(ctx, &runtime.DeleteRequest{StartKey: key}) }
-  }
+		if current, getErr := h.sandboxManager.Get(request.ID); getErr == nil && current.Metadata != nil {
+			if key := current.Metadata.Labels[startKeyLabel]; key != "" {
+				return h.deleteStart(ctx, &runtime.DeleteRequest{StartKey: key})
+			}
+		}
 	}
 	err = h.deleteSandbox(ctx, request.ID)
 	return response, err
@@ -1322,7 +1324,9 @@ func (h *sandboxService) Start(ctx context.Context, request *runtime.StartReques
 	if _, reserved := request.Labels[startKeyLabel]; reserved {
 		return nil, status.Error(codes.InvalidArgument, "start key label is managed by sandboxd")
 	}
-	if err := validateKeyedStart(request); err != nil { return nil, err }
+	if err := validateKeyedStart(request); err != nil {
+		return nil, err
+	}
 	startCtx, finishStart, err := h.beginStart(ctx, request.StartKey, request.ExpectedStartFenceInstance)
 	if err != nil {
 		return nil, err
@@ -1580,27 +1584,31 @@ func (h *sandboxService) Start(ctx context.Context, request *runtime.StartReques
 	var aclRegistered bool
 	var xpuAcquired bool
 	defer func() {
-  if startReq.StartKey != "" {
-   cleanup := &startCleanup{id: sandboxID, runtimeName: startReq.Runtime, native: runtimeAttempted,
-    fs: preparedFilesystem, fsCommitted: filesystemCommitted, resources: preparedResources, files: sandboxFiles,
-    dnat: dnatConfigured, acl: aclAttempted, xpu: xpuAcquired, managedOwner: owner, quarantineEndpoint: aclAttempted && !aclRegistered}
-   if !startSucceeded {
-    cleanup.managedRollback = managedRollback
-    managedRollback = nil
-    managedOwnerRelease = nil
-   }
-   h.setStartCleanup(startReq.StartKey, cleanup)
-   if !startSucceeded {
-    cleanupCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-    defer cancel()
-    if err := h.cleanupStart(cleanupCtx, cleanup); err != nil {
-     logrus.Warnf("retain failed start %s for keyed cleanup: %v", sandboxID, err)
-    } else { h.setStartCleanup(startReq.StartKey, nil) }
-   }
-   return
-  }
-  if startSucceeded { return }
-  if runtimeStarted {
+		if startReq.StartKey != "" {
+			cleanup := &startCleanup{id: sandboxID, runtimeName: startReq.Runtime, native: runtimeAttempted,
+				fs: preparedFilesystem, fsCommitted: filesystemCommitted, resources: preparedResources, files: sandboxFiles,
+				dnat: dnatConfigured, acl: aclAttempted, xpu: xpuAcquired, managedOwner: owner, quarantineEndpoint: aclAttempted && !aclRegistered}
+			if !startSucceeded {
+				cleanup.managedRollback = managedRollback
+				managedRollback = nil
+				managedOwnerRelease = nil
+			}
+			h.setStartCleanup(startReq.StartKey, cleanup)
+			if !startSucceeded {
+				cleanupCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+				defer cancel()
+				if err := h.cleanupStart(cleanupCtx, cleanup); err != nil {
+					logrus.Warnf("retain failed start %s for keyed cleanup: %v", sandboxID, err)
+				} else {
+					h.setStartCleanup(startReq.StartKey, nil)
+				}
+			}
+			return
+		}
+		if startSucceeded {
+			return
+		}
+		if runtimeStarted {
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			if handler, ok := h.serviceHandler.Get(startReq.Runtime); ok {
 				if err := handler.Delete(cleanupCtx, sandboxID); err != nil {
@@ -1671,9 +1679,11 @@ func (h *sandboxService) Start(ctx context.Context, request *runtime.StartReques
 		fsCh <- fsPrepareResult{fs: preparedFS, err: err}
 	}()
 	go func() {
-  prepare := h.prepareStartResources
-  if startReq.StartKey != "" { prepare = h.prepareOwnedStartResources }
-  resources, err := prepare(startReq.Runtime, sandboxID)
+		prepare := h.prepareStartResources
+		if startReq.StartKey != "" {
+			prepare = h.prepareOwnedStartResources
+		}
+		resources, err := prepare(startReq.Runtime, sandboxID)
 		resourceCh <- resourcePrepareResult{resources: resources, err: err}
 	}()
 
@@ -1824,15 +1834,19 @@ func (h *sandboxService) Start(ctx context.Context, request *runtime.StartReques
 
 	// If Ports are specified, set up DNAT rules using sandbox IP from startSandboxRuntime.
 	if len(startReq.Ports) > 0 {
-  if startReq.StartKey != "" { dnatConfigured = true }
+		if startReq.StartKey != "" {
+			dnatConfigured = true
+		}
 		if preparedResources.sandboxIP == "" {
 			return &runtime.StartResponse{
 				Code:    -1,
 				Message: "Failed to get sandbox IP for DNAT",
 			}, errors.New("sandbox IP not available")
 		}
-  setupDNAT := h.networkMgr.setupDnatRules
-  if startReq.StartKey != "" { setupDNAT = h.networkMgr.setupDnatRulesOwned }
+		setupDNAT := h.networkMgr.setupDnatRules
+		if startReq.StartKey != "" {
+			setupDNAT = h.networkMgr.setupDnatRulesOwned
+		}
 		if err := setupDNAT(sandboxID, startReq.Ports, preparedResources.sandboxIP); err != nil {
 			return &runtime.StartResponse{
 				Code:    -1,

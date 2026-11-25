@@ -34,11 +34,11 @@ type preparedStartResources struct {
 }
 
 func (h *sandboxService) prepareStartResources(runtimeName, sandboxID string) (*preparedStartResources, error) {
- return h.prepareStartResourcesForAttempt(runtimeName, sandboxID, false)
+	return h.prepareStartResourcesForAttempt(runtimeName, sandboxID, false)
 }
 
 func (h *sandboxService) prepareOwnedStartResources(runtimeName, sandboxID string) (*preparedStartResources, error) {
- return h.prepareStartResourcesForAttempt(runtimeName, sandboxID, true)
+	return h.prepareStartResourcesForAttempt(runtimeName, sandboxID, true)
 }
 
 func (h *sandboxService) prepareStartResourcesForAttempt(runtimeName, sandboxID string, retain bool) (*preparedStartResources, error) {
@@ -62,17 +62,17 @@ func prepareRequiredStartResources(
 	allocate func(string) (string, *networkmanager.NetResource, error),
 	release func(sandbox.OccupiedResource) error,
 ) (*preparedStartResources, error) {
- return prepareRequiredStartResourcesForAttempt(sandboxID, required, allocate, release, false)
+	return prepareRequiredStartResourcesForAttempt(sandboxID, required, allocate, release, false)
 }
 
 func prepareRequiredStartResourcesForAttempt(
- sandboxID string,
- required []string,
- allocate func(string) (string, *networkmanager.NetResource, error),
- release func(sandbox.OccupiedResource) error,
- retain bool,
+	sandboxID string,
+	required []string,
+	allocate func(string) (string, *networkmanager.NetResource, error),
+	release func(sandbox.OccupiedResource) error,
+	retain bool,
 ) (*preparedStartResources, error) {
- results := make([]resourceResult, len(required))
+	results := make([]resourceResult, len(required))
 	var wg sync.WaitGroup
 	for i, name := range required {
 		wg.Go(func() {
@@ -104,7 +104,9 @@ func prepareRequiredStartResourcesForAttempt(
 		}
 	}
 	if firstErr != nil {
-  if retain { return resources, firstErr }
+		if retain {
+			return resources, firstErr
+		}
 		if err := release(resources.OccupiedResource); err != nil {
 			logrus.Warnf("rollback start resources for %s failed after allocation error: %v", sandboxID, err)
 		}

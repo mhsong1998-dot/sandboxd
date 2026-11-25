@@ -39,7 +39,7 @@ func TestV010WireContract(t *testing.T) {
 	// (field 23), expected_start_fence_instance (field 25), and DeleteRequest.start_key
 	// (field 3). Existing message fields and RPC method identities are unchanged.
 	// Recompute after any proto change: run this test, copy the got hash.
-	const want = "397a1f9b10afb4227fb5c23fe79ddebc96d925c03d2583c8712eee0d90c7a249"
+	const want = "f29b53fb6ea9247643db5147c985c3b0b876e9798da606454b55808fb017cec3"
 	if got := hex.EncodeToString(sum[:]); got != want {
 		t.Fatalf("sandbox API descriptor hash = %s, want %s", got, want)
 	}
