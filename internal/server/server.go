@@ -601,8 +601,11 @@ func (h *sandboxService) ListAvailableRuntimes(
 	_ context.Context,
 	_ *runtime.ListAvailableRuntimesRequest,
 ) (*runtime.ListAvailableRuntimesResponse, error) {
-	if !h.Healthy() {
-		return nil, errord.ToGRPCf(errord.ErrUnavailable, "sandbox service is not ready")
+	health := h.healthSnapshot()
+	if !health.isHealthy() {
+		return nil, errord.ToGRPCf(errord.ErrUnavailable,
+			"sandbox service is not ready (recovery_ready=%t manager_ready=%t resource=%s image=%s volume=%s)",
+			health.recoveryReady, health.managerReady, health.resource, health.image, health.volume)
 	}
 	runtimeClasses := make([]string, 0, h.serviceHandler.Count())
 	for _, name := range h.serviceHandler.Keys() {
@@ -742,24 +745,54 @@ func (h *sandboxService) Shutdown() {
 	logrus.Info("sandbox service shutdown complete")
 }
 
+type moduleHealthSnapshot struct {
+	enabled bool
+	healthy bool
+}
+
+func (s moduleHealthSnapshot) isHealthy() bool { return !s.enabled || s.healthy }
+
+func (s moduleHealthSnapshot) String() string {
+	if !s.enabled {
+		return "disabled"
+	}
+	if s.healthy {
+		return "healthy"
+	}
+	return "unhealthy"
+}
+
+type serviceHealthSnapshot struct {
+	recoveryReady, managerReady bool
+	resource, image, volume     moduleHealthSnapshot
+}
+
+func (s serviceHealthSnapshot) isHealthy() bool {
+	return s.recoveryReady && s.managerReady && s.resource.isHealthy() && s.image.isHealthy() && s.volume.isHealthy()
+}
+
+// Read each local gate once, so a failed RPC describes the same observations
+// that rejected it. The independent module reads are not a global atomic view.
+func (h *sandboxService) healthSnapshot() serviceHealthSnapshot {
+	s := serviceHealthSnapshot{recoveryReady: h.recoveryReady.Load(), managerReady: h.ready.Load()}
+	if h.resourceMod != nil {
+		s.resource = moduleHealthSnapshot{enabled: true, healthy: h.resourceMod.Healthy()}
+	}
+	if h.imageMod != nil {
+		s.image = moduleHealthSnapshot{enabled: true, healthy: h.imageMod.Healthy()}
+	}
+	if h.volumeMgr != nil {
+		s.volume = moduleHealthSnapshot{enabled: true, healthy: h.volumeMgr.Healthy()}
+	}
+	return s
+}
+
 // Healthy aggregates each module's Healthy() signal into a single boolean
 // for the process-level health endpoint. A module that has not
 // been constructed (e.g. legacy code path) is treated as not unhealthy:
 // only an explicit false from a live module flips the result.
 func (h *sandboxService) Healthy() bool {
-	if !h.recoveryReady.Load() || !h.ready.Load() {
-		return false
-	}
-	if h.resourceMod != nil && !h.resourceMod.Healthy() {
-		return false
-	}
-	if h.imageMod != nil && !h.imageMod.Healthy() {
-		return false
-	}
-	if h.volumeMgr != nil && !h.volumeMgr.Healthy() {
-		return false
-	}
-	return true
+	return h.healthSnapshot().isHealthy()
 }
 
 func (h *sandboxService) RegisterServer(server *grpc.Server) {

@@ -891,6 +891,12 @@ func (m *Manager) CleanSandboxRootChecked(id string) error {
 	if err != nil {
 		return err
 	}
+	if sb, ok := m.sandboxes.Get(id); ok && sb != nil {
+		// Strict retirement unlinks the root before DeleteWithContext. Mark
+		// this object first so a concurrent status rename that loses its
+		// temporary file does not mistake retirement for a live I/O failure.
+		sb.retiring.Store(true)
+	}
 	if err := os.RemoveAll(root); err != nil {
 		return fmt.Errorf("clean sandbox root: %w", err)
 	}
