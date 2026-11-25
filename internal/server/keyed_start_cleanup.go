@@ -52,7 +52,7 @@ func validateKeyedStart(req *runtime.StartRequest) error {
  if req.StartKey == "" { return nil }
  profile, err := managedProfileSelection(req)
  if err != nil { return err }
- if req.CheckpointInfo != nil || profile != "" || req.Rootfs.GetType() == runtime.RootfsSrcType_S3 {
+ if req.CheckpointInfo != nil || profile != "" || (req.Rootfs != nil && req.Rootfs.GetType() == runtime.RootfsSrcType_S3) {
   return status.Error(codes.Unimplemented, "start-key retirement does not support S3, checkpoints or managed runtime profiles")
  }
  for _, mount := range req.Mounts {
