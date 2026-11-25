@@ -103,10 +103,9 @@ func TestListSnapshotDoesNotMissPendingToCommittedHandoff(t *testing.T) {
  result := make(chan *runtime.ListSandboxesResponse, 1)
  go func() { response, _ := s.List(context.Background(), &runtime.ListSandboxesRequest{}); result <- response }()
  <-read
- published := make(chan struct{})
+ storeSandboxForDelete(t, s, id)
  finished := make(chan struct{})
- go func() { storeSandboxForDelete(t, s, id); close(published); finish(); close(finished) }()
- <-published
+ go func() { finish(); close(finished) }()
  close(resume)
  response := <-result
  <-finished
