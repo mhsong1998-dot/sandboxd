@@ -198,9 +198,28 @@ func copyStringMap(in map[string]string) map[string]string {
 }
 
 func (h *sandboxService) startSandboxRuntime(
-	ctx context.Context,
-	runtimeName string,
-	startConfig svc.StartConfig,
+ ctx context.Context,
+ runtimeName string,
+ startConfig svc.StartConfig,
+) error {
+ return h.startSandboxRuntimeForAttempt(ctx, runtimeName, startConfig, false)
+}
+
+// startSandboxRuntimeOwned never removes an attempt's root after a handler
+// error: a partially created native may still require it for safe deletion.
+func (h *sandboxService) startSandboxRuntimeOwned(
+ ctx context.Context,
+ runtimeName string,
+ startConfig svc.StartConfig,
+) error {
+ return h.startSandboxRuntimeForAttempt(ctx, runtimeName, startConfig, true)
+}
+
+func (h *sandboxService) startSandboxRuntimeForAttempt(
+ ctx context.Context,
+ runtimeName string,
+ startConfig svc.StartConfig,
+ retainRoot bool,
 ) (err error) {
 	if err := h.validateRestoreTarget(runtimeName, startConfig.ID, startConfig.CheckpointDir); err != nil {
 		return errord.ToGRPC(fmt.Errorf("%v: %w", err, errord.ErrInvalidArgument))
@@ -260,7 +279,7 @@ func (h *sandboxService) startSandboxRuntime(
 	}
 	if err != nil {
 		logrus.WithField(trace.ContextKeyTraceId, traceID).Errorf("runtime handler create sandbox failed: %v", err)
-		h.sandboxManager.CleanSandboxRoot(startConfig.ID)
+  if !retainRoot { h.sandboxManager.CleanSandboxRoot(startConfig.ID) }
 		return errord.ToGRPC(err)
 	}
 
@@ -1675,7 +1694,9 @@ func (h *sandboxService) Start(ctx context.Context, request *runtime.StartReques
 	fsCh := make(chan fsPrepareResult, 1)
 	resourceCh := make(chan resourcePrepareResult, 1)
 	go func() {
-		preparedFS, err := h.fsMgr.Prepare(ctx, startReq)
+  prepare := h.fsMgr.Prepare
+  if startReq.StartKey != "" { prepare = h.fsMgr.PrepareOwned }
+		preparedFS, err := prepare(ctx, startReq)
 		fsCh <- fsPrepareResult{fs: preparedFS, err: err}
 	}()
 	go func() {
@@ -1823,7 +1844,9 @@ func (h *sandboxService) Start(ctx context.Context, request *runtime.StartReques
 		ManagedHosts:            sandboxFiles.ManagedHosts(),
 	}
 	runtimeAttempted = true
-	if err := h.startSandboxRuntime(ctx, startReq.Runtime, runtimeConfig); err != nil {
+ startRuntime := h.startSandboxRuntime
+ if startReq.StartKey != "" { startRuntime = h.startSandboxRuntimeOwned }
+	if err := startRuntime(ctx, startReq.Runtime, runtimeConfig); err != nil {
 		return &runtime.StartResponse{
 			Code:    -1,
 			Message: fmt.Sprintf("Failed to start: %v", err),

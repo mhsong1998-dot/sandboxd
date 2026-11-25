@@ -112,7 +112,17 @@ func newOciMountManagerForFS(imgSvc imageapi.Service) *ociMountManager {
 	}
 }
 
-func (m *fsManager) Prepare(ctx context.Context, request *runtime.StartRequest) (_ *preparedFS, retErr error) {
+func (m *fsManager) Prepare(ctx context.Context, request *runtime.StartRequest) (*preparedFS, error) {
+ return m.prepareForAttempt(ctx, request, false)
+}
+
+// PrepareOwned returns every acquired reference on failure. Keyed Start retains
+// that partial preparation until strict cleanup confirms its release.
+func (m *fsManager) PrepareOwned(ctx context.Context, request *runtime.StartRequest) (*preparedFS, error) {
+ return m.prepareForAttempt(ctx, request, true)
+}
+
+func (m *fsManager) prepareForAttempt(ctx context.Context, request *runtime.StartRequest, retain bool) (result *preparedFS, retErr error) {
 	rootfs, err := m.rootfs.AddLangRuntimeWithContext(ctx, request, true)
 	if err != nil {
 		stage := "rootfs preparation"
@@ -129,9 +139,9 @@ func (m *fsManager) Prepare(ctx context.Context, request *runtime.StartRequest) 
 		source:  proto.Clone(request.Rootfs).(*runtime.RootfsConfig),
 	}
 	defer func() {
-		if retErr != nil {
-			prepared.Rollback()
-		}
+  if retErr != nil {
+   if retain { result = prepared } else { prepared.Rollback() }
+  }
 	}()
 
 	prepared.mounts = cloneMounts(request.Mounts)
