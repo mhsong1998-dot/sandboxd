@@ -1186,6 +1186,7 @@ func validateRuntimeFilestore(runtimeConfig config.RuntimeConfig) error {
 }
 
 func (h *sandboxService) Delete(ctx context.Context, request *runtime.DeleteRequest) (response *runtime.DeleteResponse, err error) {
+ if err := h.checkDeleteFenceInstance(ctx); err != nil { return nil, err }
 	if request != nil && request.StartKey != "" {
 		return h.deleteStart(ctx, request)
 	}

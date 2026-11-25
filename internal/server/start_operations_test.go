@@ -418,7 +418,7 @@ func TestDeleteStartKeyAcknowledgesProcessIncarnation(t *testing.T) {
 		if _, err := s.Delete(ctx, &runtime.DeleteRequest{StartKey: key}); err != nil {
 			t.Fatal(err)
 		}
-		if got := stream.headers.Get("sandboxd-start-fence-version"); len(got) != 1 || got[0] != "2" {
+		if got := stream.headers.Get("sandboxd-start-fence-version"); len(got) != 1 || got[0] != "3" {
 			t.Fatalf("missing strong protocol version: %v", got)
 		}
 		values := stream.headers.Get("sandboxd-start-fence-instance")

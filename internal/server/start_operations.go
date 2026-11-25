@@ -158,6 +158,19 @@ func (h *sandboxService) setStartSandbox(key, id string) {
 	h.startKeysByID[id] = key
 }
 
+// A guarded one-call ID Delete must reject a replaced daemon before touching
+// its physical ID. Comparing only the response nonce would be too late.
+func (h *sandboxService) checkDeleteFenceInstance(ctx context.Context) error {
+ values := metadata.ValueFromIncomingContext(ctx, "sandboxd-expected-start-fence-instance")
+ if len(values) == 0 { return nil }
+ if len(values) != 1 || values[0] == "" { return status.Error(codes.InvalidArgument, "delete fence instance requires one nonempty value") }
+ h.startMu.Lock()
+ defer h.startMu.Unlock()
+ if err := h.initStartRegistryLocked(); err != nil { return err }
+ if values[0] != h.startFenceInstance { return status.Error(codes.FailedPrecondition, "start fence instance changed before delete") }
+ return nil
+}
+
 // deleteStart installs a fence even when Delete arrives before Start. A client
 // timeout leaves that fence in place; a retry waits on the same completion.
 // Fences live until sandboxd exits. Keys must identify unique execution attempts.
@@ -258,7 +271,7 @@ func acknowledgeStartFence(ctx context.Context, instance string) (*runtime.Delet
  if err := ctx.Err(); err != nil { return nil, status.FromContextError(err).Err() }
 	// The acknowledgement prevents an older server that ignores start_key from
 	// being mistaken for a server that fenced an unknown attempt.
-	if err := grpc.SetHeader(ctx, metadata.Pairs("sandboxd-start-fenced", "true", "sandboxd-start-fence-instance", instance, "sandboxd-start-fence-version", "2")); err != nil {
+	if err := grpc.SetHeader(ctx, metadata.Pairs("sandboxd-start-fenced", "true", "sandboxd-start-fence-instance", instance, "sandboxd-start-fence-version", "3")); err != nil {
 		return nil, status.Error(codes.Internal, "cannot acknowledge start fence")
 	}
 	return &runtime.DeleteResponse{}, nil
