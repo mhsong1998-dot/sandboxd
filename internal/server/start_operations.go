@@ -34,6 +34,8 @@ type startOperation struct {
 	sandboxID string
 	fenced    bool
 	pending   *runtime.SandboxStatus
+ cleanup *startCleanup
+ cleanupGate chan struct{}
 }
 
 func validStartKey(key string) bool {
@@ -58,13 +60,13 @@ func (h *sandboxService) beginStart(ctx context.Context, key string) (context.Co
 		return nil, nil, status.Error(codes.AlreadyExists, "start key is already used or fenced")
 	}
 	child, cancel := context.WithCancel(ctx)
-	op := &startOperation{done: make(chan struct{}), cancel: cancel}
+	op := &startOperation{done: make(chan struct{}), cancel: cancel, cleanupGate: make(chan struct{}, 1)}
 	h.startOperations[key] = op
 	return child, func() {
 		cancel()
 		h.startMu.Lock()
 		op.cancel = nil
-		op.pending = nil
+		if op.cleanup == nil { op.pending = nil }
 		close(op.done)
 		h.startMu.Unlock()
 	}, nil
@@ -95,7 +97,7 @@ func (h *sandboxService) deleteStart(ctx context.Context, req *runtime.DeleteReq
 	}
 	op := h.startOperations[req.StartKey]
 	if op == nil {
-		op = &startOperation{done: make(chan struct{})}
+		op = &startOperation{done: make(chan struct{}), cleanupGate: make(chan struct{}, 1)}
 		close(op.done)
 		h.startOperations[req.StartKey] = op
 	}
@@ -110,31 +112,45 @@ func (h *sandboxService) deleteStart(ctx context.Context, req *runtime.DeleteReq
 	case <-ctx.Done():
 		return nil, status.FromContextError(ctx.Err()).Err()
 	}
-	// Metadata persists the generated identity across a sandboxd restart. Earlier
-	// handlers cannot still run after restart, but their committed sandbox may exist.
-	ids := make(map[string]struct{})
-	h.startMu.Lock()
-	if op.sandboxID != "" {
-		ids[op.sandboxID] = struct{}{}
-	}
-	h.startMu.Unlock()
-	for _, s := range h.sandboxManager.List(sandbox.ListFilterByLabels(map[string]string{startKeyLabel: req.StartKey})) {
-		if s != nil && s.Metadata != nil {
-			ids[s.Metadata.ID] = struct{}{}
-		}
-	}
-	for id := range ids {
-		// A caller-provided physical ID may have been reused after rollback.
-		// Only the persisted key proves this sandbox belongs to this attempt.
-		if current, err := h.sandboxManager.Get(id); err == nil {
-			if current.Metadata == nil || current.Metadata.Labels[startKeyLabel] != req.StartKey {
-				return nil, status.Error(codes.FailedPrecondition, "sandbox belongs to a different start attempt")
-			}
-		}
-		if err := h.deleteSandbox(ctx, id); err != nil {
-			return nil, err
-		}
-	}
+ // Serialize cleanup only within this exact operation. Caller timeout cannot
+ // permit a second cleaner to race a handler that ignores cancellation.
+ select {
+ case op.cleanupGate <- struct{}{}:
+  defer func() { <-op.cleanupGate }()
+ case <-ctx.Done(): return nil, status.FromContextError(ctx.Err()).Err()
+ }
+ if err := ctx.Err(); err != nil { return nil, status.FromContextError(err).Err() }
+ // The ID reservation proves an unpublished native's ownership. Metadata must
+ // also match whenever present, so an old key never deletes a reused ID.
+ h.startMu.Lock()
+ cleanup, id := op.cleanup, op.sandboxID
+ h.startMu.Unlock()
+ if cleanup != nil {
+  if current, err := h.sandboxManager.Get(id); err == nil && (current.Metadata == nil || current.Metadata.Labels[startKeyLabel] != req.StartKey) {
+   return nil, status.Error(codes.FailedPrecondition, "sandbox belongs to a different start attempt")
+  }
+  if err := h.cleanupStart(ctx, cleanup); err != nil { return nil, err }
+  h.setStartCleanup(req.StartKey, nil)
+  id = ""
+ }
+ ids := make(map[string]struct{})
+ if id != "" { ids[id] = struct{}{} }
+ for _, s := range h.sandboxManager.List(sandbox.ListFilterByLabels(map[string]string{startKeyLabel: req.StartKey})) {
+  if s != nil && s.Metadata != nil { ids[s.Metadata.ID] = struct{}{} }
+ }
+ for id := range ids {
+  current, err := h.sandboxManager.Get(id)
+  if err != nil { continue }
+  if current.Metadata == nil || current.Metadata.Labels[startKeyLabel] != req.StartKey {
+   return nil, status.Error(codes.FailedPrecondition, "sandbox belongs to a different start attempt")
+  }
+  cleanup, err := h.recoveredStartCleanup(id, current.Metadata)
+  if err != nil { return nil, err }
+  h.setStartCleanup(req.StartKey, cleanup)
+  if err := h.cleanupStart(ctx, cleanup); err != nil { return nil, err }
+  h.setStartCleanup(req.StartKey, nil)
+ }
+ if err := ctx.Err(); err != nil { return nil, status.FromContextError(err).Err() }
 	// The acknowledgement prevents an older server that ignores start_key from
 	// being mistaken for a server that fenced an unknown attempt.
 	if err := grpc.SetHeader(ctx, metadata.Pairs("sandboxd-start-fenced", "true")); err != nil {
@@ -143,16 +159,18 @@ func (h *sandboxService) deleteStart(ctx context.Context, req *runtime.DeleteReq
 	return &runtime.DeleteResponse{}, nil
 }
 
-// Ordinary deletion can forget a completed successful operation. Fenced keys
-// remain terminal so delayed Start requests cannot recreate the execution.
-func (h *sandboxService) forgetSettledStart(id string) {
-	h.startMu.Lock()
-	defer h.startMu.Unlock()
-	for key, op := range h.startOperations {
-		if op.sandboxID == id && op.cancel == nil && !op.fenced {
-			delete(h.startOperations, key)
-		}
-	}
+// Keep terminal keys for process lifetime. Evicting them would let a delayed
+// Start recreate an execution after successful retirement. Heavy cleanup state
+// and inventory snapshots are dropped once physical cleanup is confirmed.
+func (h *sandboxService) setStartCleanup(key string, cleanup *startCleanup) {
+ h.startMu.Lock()
+ defer h.startMu.Unlock()
+ op := h.startOperations[key]
+ op.cleanup = cleanup
+ if cleanup == nil {
+  op.sandboxID = ""
+  op.pending = nil
+ }
 }
 
 // The inventory snapshot and finishStart share startMu: an attempt cannot
@@ -160,7 +178,7 @@ func (h *sandboxService) forgetSettledStart(id string) {
 func (h *sandboxService) pendingInventoryLocked(req *runtime.ListSandboxesRequest) []*runtime.SandboxStatus {
 	var result []*runtime.SandboxStatus
 	for _, op := range h.startOperations {
-		if op.cancel == nil || op.pending == nil || (req.ID != "" && req.ID != op.sandboxID) {
+		if (op.cancel == nil && op.cleanup == nil) || op.pending == nil || (req.ID != "" && req.ID != op.sandboxID) {
 			continue
 		}
 		matches := true
@@ -192,7 +210,7 @@ func (h *sandboxService) activeStartKey(id string) string {
 	h.startMu.Lock()
 	defer h.startMu.Unlock()
 	for key, op := range h.startOperations {
-		if op.cancel != nil && op.sandboxID == id {
+		if (op.cancel != nil || op.cleanup != nil) && op.sandboxID == id {
 			return key
 		}
 	}

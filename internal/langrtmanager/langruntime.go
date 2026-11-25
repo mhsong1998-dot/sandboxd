@@ -16,6 +16,7 @@ package langrtmanager
 
 import (
 	"sync"
+ "fmt"
 
 	"github.com/sirupsen/logrus"
 )
@@ -61,4 +62,18 @@ func (lr *LanguageRuntime) DecRef() {
 	} else if lr.refcnt < 0 {
 		logrus.Warningf("Refcount %v < 0, leak happens.", lr.refcnt)
 	}
+}
+
+// ReleaseChecked preserves ownership if final rootfs cleanup fails. Legacy
+// DecRef callers keep their existing best-effort behavior.
+func (lr *LanguageRuntime) ReleaseChecked() error {
+ lr.mu.Lock()
+ defer lr.mu.Unlock()
+ if lr.refcnt <= 0 { return fmt.Errorf("language runtime has no owned reference") }
+ if lr.temporary && lr.refcnt == 1 {
+  if err := lr.RootFS.ReleaseChecked(); err != nil { return err }
+  lr.cleanupFunc()
+ }
+ lr.refcnt--
+ return nil
 }

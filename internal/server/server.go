@@ -1150,11 +1150,11 @@ func (h *sandboxService) Delete(ctx context.Context, request *runtime.DeleteRequ
 		if key := h.activeStartKey(request.ID); key != "" {
 			return h.deleteStart(ctx, &runtime.DeleteRequest{StartKey: key})
 		}
+  if current, getErr := h.sandboxManager.Get(request.ID); getErr == nil && current.Metadata != nil {
+   if key := current.Metadata.Labels[startKeyLabel]; key != "" { return h.deleteStart(ctx, &runtime.DeleteRequest{StartKey: key}) }
+  }
 	}
 	err = h.deleteSandbox(ctx, request.ID)
-	if err == nil {
-		h.forgetSettledStart(request.ID)
-	}
 	return response, err
 }
 
@@ -1320,6 +1320,7 @@ func (h *sandboxService) Start(ctx context.Context, request *runtime.StartReques
 	if _, reserved := request.Labels[startKeyLabel]; reserved {
 		return nil, status.Error(codes.InvalidArgument, "start key label is managed by sandboxd")
 	}
+	if err := validateKeyedStart(request); err != nil { return nil, err }
 	startCtx, finishStart, err := h.beginStart(ctx, request.StartKey)
 	if err != nil {
 		return nil, err
@@ -1571,15 +1572,33 @@ func (h *sandboxService) Start(ctx context.Context, request *runtime.StartReques
 	var sandboxFiles *preparedSandboxFiles
 	var filesystemCommitted bool
 	var runtimeStarted bool
+	var runtimeAttempted bool
 	var dnatConfigured bool
 	var aclAttempted bool
 	var aclRegistered bool
 	var xpuAcquired bool
 	defer func() {
-		if startSucceeded {
-			return
-		}
-		if runtimeStarted {
+  if startReq.StartKey != "" {
+   cleanup := &startCleanup{id: sandboxID, runtimeName: startReq.Runtime, native: runtimeAttempted,
+    fs: preparedFilesystem, fsCommitted: filesystemCommitted, resources: preparedResources, files: sandboxFiles,
+    dnat: dnatConfigured, acl: aclAttempted, xpu: xpuAcquired, managedOwner: owner}
+   if !startSucceeded {
+    cleanup.managedRollback = managedRollback
+    managedRollback = nil
+    managedOwnerRelease = nil
+   }
+   h.setStartCleanup(startReq.StartKey, cleanup)
+   if !startSucceeded {
+    cleanupCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+    defer cancel()
+    if err := h.cleanupStart(cleanupCtx, cleanup); err != nil {
+     logrus.Warnf("retain failed start %s for keyed cleanup: %v", sandboxID, err)
+    } else { h.setStartCleanup(startReq.StartKey, nil) }
+   }
+   return
+  }
+  if startSucceeded { return }
+  if runtimeStarted {
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			if handler, ok := h.serviceHandler.Get(startReq.Runtime); ok {
 				if err := handler.Delete(cleanupCtx, sandboxID); err != nil {
@@ -1650,7 +1669,9 @@ func (h *sandboxService) Start(ctx context.Context, request *runtime.StartReques
 		fsCh <- fsPrepareResult{fs: preparedFS, err: err}
 	}()
 	go func() {
-		resources, err := h.prepareStartResources(startReq.Runtime, sandboxID)
+  prepare := h.prepareStartResources
+  if startReq.StartKey != "" { prepare = h.prepareOwnedStartResources }
+  resources, err := prepare(startReq.Runtime, sandboxID)
 		resourceCh <- resourcePrepareResult{resources: resources, err: err}
 	}()
 
@@ -1789,6 +1810,7 @@ func (h *sandboxService) Start(ctx context.Context, request *runtime.StartReques
 		InitialFiles:            sandboxFiles.InitialFiles(),
 		ManagedHosts:            sandboxFiles.ManagedHosts(),
 	}
+	runtimeAttempted = true
 	if err := h.startSandboxRuntime(ctx, startReq.Runtime, runtimeConfig); err != nil {
 		return &runtime.StartResponse{
 			Code:    -1,

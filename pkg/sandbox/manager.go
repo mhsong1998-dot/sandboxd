@@ -881,6 +881,15 @@ func (m *Manager) CollectResourceByID(id string) (OccupiedResource, error) {
 	return resource, nil
 }
 
+// CleanSandboxRootChecked retains the caller's ID reservation on failure.
+// Keyed start retirement requires this result before acknowledging cleanup.
+func (m *Manager) CleanSandboxRootChecked(id string) error {
+ root, err := util.JoinWithinRoot(m.root, id)
+ if err != nil { return err }
+ if err := os.RemoveAll(root); err != nil { return fmt.Errorf("clean sandbox root: %w", err) }
+ return nil
+}
+
 func (m *Manager) CleanSandboxRoot(id string) {
 	sandboxRoot, err := util.JoinWithinRoot(m.root, id)
 	if err != nil {

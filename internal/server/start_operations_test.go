@@ -20,11 +20,10 @@ import (
 	"net"
 	"sync"
 	"strings"
-
-	gomonkey "github.com/agiledragon/gomonkey/v2"
 	"testing"
 	"time"
 
+	gomonkey "github.com/agiledragon/gomonkey/v2"
 	runtime "github.com/inclusionAI/sandboxd/api/runtime/v1"
 	"github.com/inclusionAI/sandboxd/config"
 	"github.com/inclusionAI/sandboxd/internal/testregistry"
@@ -240,11 +239,7 @@ func (s *fenceHeaderStream) SetHeader(md metadata.MD) error {
 func TestDeleteStartKeyRetainsFailedNativeRollbackUntilRetry(t *testing.T) {
  handler := &failedRollbackHandler{FakeRuntimeHandler: svc.NewFakeRuntimeHandler(), failDelete: true}
  s := newTestService(t, map[string]svc.Handler{config.RuntimeNameRunsc: handler})
- // Avoid host network/cgroup mutation while exercising the real Start rollback.
- patch := gomonkey.ApplyPrivateMethod(s, "prepareStartResources", func(_ *sandboxService, _, id string) (*preparedStartResources, error) {
-  return &preparedStartResources{OccupiedResource: sandbox.OccupiedResource{ID: id, Resources: map[string]string{}}, network: &networkmanager.NetResource{Ip: net.ParseIP("10.0.0.2")}}, nil
- })
- defer patch.Reset()
+ useFakeStartResources(t, s)
  const id = "sbox-failed-native-rollback"
  const key = "failed-native-rollback"
  _, err := s.Start(context.Background(), &runtime.StartRequest{
@@ -273,4 +268,57 @@ func TestDeleteStartKeyRetainsFailedNativeRollbackUntilRetry(t *testing.T) {
  storeSandboxForDelete(t, s, id)
  _, _ = s.Delete(fenceContext(), &runtime.DeleteRequest{StartKey: key})
  if handler.deletes != 3 { t.Fatal("old fence deleted a reused physical identity") }
+}
+
+func useFakeStartResources(t *testing.T, s *sandboxService) {
+ t.Helper()
+ // Avoid host network/cgroup mutation while exercising real Start/rollback.
+ patch := gomonkey.ApplyPrivateMethod(s, "prepareStartResourcesForAttempt", func(_ *sandboxService, _, id string, _ bool) (*preparedStartResources, error) {
+  return &preparedStartResources{OccupiedResource: sandbox.OccupiedResource{ID: id, Resources: map[string]string{}}, network: &networkmanager.NetResource{Ip: net.ParseIP("10.0.0.2")}}, nil
+ })
+ t.Cleanup(patch.Reset)
+}
+
+type failedRootfsRelease struct {
+ *fsTestImageService
+ fail bool
+ releases int
+}
+
+func (s *failedRootfsRelease) UmountOCI(req *imageapi.OCIUmountRequest) error {
+ s.releases++
+ if s.fail { return errors.New("injected rootfs release failure") }
+ return s.fsTestImageService.UmountOCI(req)
+}
+
+func TestDeleteStartKeyRetainsFailedRootfsReleaseUntilRetry(t *testing.T) {
+ handler := &failedRollbackHandler{FakeRuntimeHandler: svc.NewFakeRuntimeHandler()}
+ s := newTestService(t, map[string]svc.Handler{config.RuntimeNameRunsc: handler})
+ useFakeStartResources(t, s)
+ images := &failedRootfsRelease{fsTestImageService: newFSTestImageService(), fail: true}
+ s.fsMgr = newFSManager(images)
+ req := fsTestStartRequest("sbox-failed-rootfs-release")
+ req.StartKey, req.Runtime, req.Mounts, req.Ports = "failed-rootfs-release", config.RuntimeNameRunsc, nil, []string{"8080:80"}
+ if _, err := s.Start(context.Background(), req); err == nil || !strings.Contains(err.Error(), "sandbox IP not available") { t.Fatalf("post-start failure not reached: %v", err) }
+ if handler.native != "" || handler.deletes != 1 { t.Fatal("native must be deleted before filesystem release") }
+ stream := &fenceHeaderStream{}
+ ctx := grpc.NewContextWithServerTransportStream(context.Background(), stream)
+ if _, err := s.Delete(ctx, &runtime.DeleteRequest{StartKey: req.StartKey}); err == nil { t.Fatal("failed rootfs release was acknowledged") }
+ if len(stream.headers.Get("sandboxd-start-fenced")) != 0 { t.Fatal("failed rootfs release sent ACK") }
+ if _, err := s.sandboxManager.ReserveID(req.SandboxID); err == nil { t.Fatal("rootfs release failure released ID") }
+ images.fail = false
+ if _, err := s.Delete(fenceContext(), &runtime.DeleteRequest{StartKey: req.StartKey}); err != nil { t.Fatal(err) }
+ if handler.deletes != 1 || images.releases != 3 || len(s.fsMgr.rootfs.List()) != 0 { t.Fatalf("retry did not consume exact outstanding resource: deletes=%d releases=%d rootfs=%d", handler.deletes, images.releases, len(s.fsMgr.rootfs.List())) }
+}
+
+func TestStartKeyRejectsUnsupportedPreparationBeforeAcquisition(t *testing.T) {
+ s := newTestService(t, map[string]svc.Handler{config.RuntimeNameRunsc: svc.NewFakeRuntimeHandler()})
+ for _, req := range []*runtime.StartRequest{
+  {StartKey: "key-mount", Mounts: []*runtime.Mount{{Target: "/volume"}}},
+  {StartKey: "key-restore", CheckpointInfo: &runtime.CheckpointInfo{}},
+  {StartKey: "key-s3", Rootfs: &runtime.RootfsConfig{Type: runtime.RootfsSrcType_S3}},
+ } {
+  if _, err := s.Start(context.Background(), req); status.Code(err) != codes.Unimplemented { t.Fatalf("unsupported start acquired resources: %v", err) }
+ }
+ if len(s.startOperations) != 0 || len(s.fsMgr.rootfs.List()) != 0 { t.Fatal("unsupported preparation acquired ownership") }
 }
