@@ -20,6 +20,9 @@ import (
 	"encoding/hex"
 	"io"
 	"strings"
+ "unsafe"
+
+ "github.com/inclusionAI/sandboxd/internal/metrics"
 
 	runtime "github.com/inclusionAI/sandboxd/api/runtime/v1"
 	"github.com/inclusionAI/sandboxd/pkg/sandbox"
@@ -35,10 +38,43 @@ type startOperation struct {
 	done        chan struct{}
 	cancel      context.CancelFunc
 	sandboxID   string
-	fenced      bool
 	pending     *runtime.SandboxStatus
 	cleanup     *startCleanup
 	cleanupGate chan struct{}
+}
+
+// All retired keys share this immutable object. The map retains every key, but
+// no per-key completion/cleanup channels survive confirmed retirement.
+var terminalStartOperation = func() *startOperation {
+ done := make(chan struct{})
+ close(done)
+ return &startOperation{done: done}
+}()
+
+func (h *sandboxService) recordStartRegistryLocked() {
+ active := uint64(len(h.startOperations)) - h.startTerminalKeys
+ metrics.RecordResourceGauge("start_keys_active", float64(active))
+ metrics.RecordResourceGauge("start_keys_terminal", float64(h.startTerminalKeys))
+ metrics.RecordResourceGauge("start_key_bytes", float64(h.startKeyBytes))
+ // A lower bound, not a heap measurement: excludes map capacity, channels,
+ // pending/cleanup payloads, string headers and in-flight reader references.
+ metrics.RecordResourceGauge("start_operation_struct_bytes", float64((active+1)*uint64(unsafe.Sizeof(startOperation{}))))
+}
+
+func (h *sandboxService) insertStartOperationLocked(key string, op *startOperation) {
+ h.startOperations[key] = op
+ h.startKeyBytes += uint64(len(key))
+ h.recordStartRegistryLocked()
+}
+
+func (h *sandboxService) compactStartOperationLocked(key string, op *startOperation) {
+ if h.startOperations[key] != op || op == terminalStartOperation || op.cancel != nil || op.cleanup != nil || op.sandboxID != "" { return }
+ if h.startKeysByID[op.sandboxID] == key { delete(h.startKeysByID, op.sandboxID) }
+ op.sandboxID = ""
+ op.pending = nil
+ h.startOperations[key] = terminalStartOperation
+ h.startTerminalKeys++
+ h.recordStartRegistryLocked()
 }
 
 // A fresh registry carries a fresh process incarnation. An acknowledgement from
@@ -98,7 +134,7 @@ func (h *sandboxService) beginStart(ctx context.Context, key, expectedInstance s
 	}
 	child, cancel := context.WithCancel(ctx)
 	op := &startOperation{done: make(chan struct{}), cancel: cancel, cleanupGate: make(chan struct{}, 1)}
-	h.startOperations[key] = op
+	h.insertStartOperationLocked(key, op)
 	return child, func() {
 		cancel()
 		h.startMu.Lock()
@@ -107,6 +143,7 @@ func (h *sandboxService) beginStart(ctx context.Context, key, expectedInstance s
 			op.pending = nil
 		}
 		close(op.done)
+  h.compactStartOperationLocked(key, op)
 		h.startMu.Unlock()
 	}, nil
 }
@@ -138,12 +175,15 @@ func (h *sandboxService) deleteStart(ctx context.Context, req *runtime.DeleteReq
 	}
 	instance := h.startFenceInstance
 	op := h.startOperations[req.StartKey]
+ if op == terminalStartOperation {
+  h.startMu.Unlock()
+  return acknowledgeStartFence(ctx, instance)
+ }
 	if op == nil {
 		op = &startOperation{done: make(chan struct{}), cleanupGate: make(chan struct{}, 1)}
 		close(op.done)
-		h.startOperations[req.StartKey] = op
+		h.insertStartOperationLocked(req.StartKey, op)
 	}
-	op.fenced = true
 	cancel := op.cancel
 	h.startMu.Unlock()
 	if cancel != nil {
@@ -210,6 +250,12 @@ func (h *sandboxService) deleteStart(ctx context.Context, req *runtime.DeleteReq
 	if err := ctx.Err(); err != nil {
 		return nil, status.FromContextError(err).Err()
 	}
+ h.setStartCleanup(req.StartKey, nil)
+ return acknowledgeStartFence(ctx, instance)
+}
+
+func acknowledgeStartFence(ctx context.Context, instance string) (*runtime.DeleteResponse, error) {
+ if err := ctx.Err(); err != nil { return nil, status.FromContextError(err).Err() }
 	// The acknowledgement prevents an older server that ignores start_key from
 	// being mistaken for a server that fenced an unknown attempt.
 	if err := grpc.SetHeader(ctx, metadata.Pairs("sandboxd-start-fenced", "true", "sandboxd-start-fence-instance", instance, "sandboxd-start-fence-version", "2")); err != nil {
@@ -225,6 +271,7 @@ func (h *sandboxService) setStartCleanup(key string, cleanup *startCleanup) {
 	h.startMu.Lock()
 	defer h.startMu.Unlock()
 	op := h.startOperations[key]
+ if op == terminalStartOperation { return }
 	op.cleanup = cleanup
 	if cleanup == nil {
 		if h.startKeysByID[op.sandboxID] == key {
@@ -232,35 +279,23 @@ func (h *sandboxService) setStartCleanup(key string, cleanup *startCleanup) {
 		}
 		op.sandboxID = ""
 		op.pending = nil
+  h.compactStartOperationLocked(key, op)
 	} else {
 		op.sandboxID = cleanup.id
 		h.startKeysByID[cleanup.id] = key
 	}
 }
 
-// The inventory snapshot and finishStart share startMu: an attempt cannot
-// disappear between reading committed metadata and copying its pending status.
-func (h *sandboxService) pendingInventoryLocked(req *runtime.ListSandboxesRequest) []*runtime.SandboxStatus {
-	var result []*runtime.SandboxStatus
-	for _, key := range h.startKeysByID {
-		op := h.startOperations[key]
-		if (op.cancel == nil && op.cleanup == nil) || op.pending == nil || (req.ID != "" && req.ID != op.sandboxID) {
-			continue
-		}
-		matches := true
-		if req.ID == "" {
-			for k, v := range req.Selector {
-				if op.pending.Labels[k] != v {
-					matches = false
-					break
-				}
-			}
-		}
-		if matches {
-			result = append(result, &runtime.SandboxStatus{ID: op.pending.ID, Runtime: op.pending.Runtime, State: runtime.SandboxState_SANDBOX_STATE_UNKNOWN, Labels: copyStringMap(op.pending.Labels), MetricLabels: copyStringMap(op.pending.MetricLabels), Stdout: op.pending.Stdout, Stderr: op.pending.Stderr})
-		}
-	}
-	return result
+// Snapshot only immutable pending records while completion is excluded. The
+// caller filters and copies them after releasing startMu. Clearing op.pending
+// or compacting its operation never changes an already retained record.
+func (h *sandboxService) pendingInventoryReferencesLocked() []*runtime.SandboxStatus {
+ result := make([]*runtime.SandboxStatus, 0, len(h.startKeysByID))
+ for _, key := range h.startKeysByID {
+  op := h.startOperations[key]
+  if (op.cancel != nil || op.cleanup != nil) && op.pending != nil { result = append(result, op.pending) }
+ }
+ return result
 }
 
 func (h *sandboxService) setStartInventory(req *runtime.StartRequest) {

@@ -654,20 +654,23 @@ func (m *Manager) UpdateLabels(id string, labels map[string]string) error {
 	if len(labels) == 0 {
 		return nil
 	}
-	needUpdate := false
+ // Published metadata is immutable, including label maps. Inventory readers
+ // can retain this version while the replacement is written and installed.
+ updated := proto.Clone(c.Metadata).(*runtime.SandboxMetadata)
+ needUpdate := false
 	for k, v := range labels {
-		if c.Metadata.Labels == nil {
-			c.Metadata.Labels = make(map[string]string)
+		if updated.Labels == nil {
+			updated.Labels = make(map[string]string)
 		}
-		if c.Metadata.Labels[k] != v {
-			c.Metadata.Labels[k] = v
+		if updated.Labels[k] != v {
+			updated.Labels[k] = v
 			needUpdate = true
 		}
 	}
 	if !needUpdate {
 		return nil
 	}
-	return m.StoreMetadata(id, c.Metadata)
+	return m.StoreMetadata(id, updated)
 }
 
 func (m *Manager) List(option ...ListOption) []*Sandbox {
