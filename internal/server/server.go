@@ -77,6 +77,7 @@ var _ SandboxService = &sandboxService{}
 type sandboxService struct {
 	startMu         sync.Mutex
 	startOperations map[string]*startOperation
+ startFenceInstance string
 
 	// config is the sandbox service config
 	config         config.Config

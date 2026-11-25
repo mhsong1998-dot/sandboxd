@@ -344,3 +344,29 @@ func TestStartKeyDnatFailureRetainsAttemptedRulesForCleanupRetry(t *testing.T) {
  if err := s.networkMgr.cleanupDnatRulesChecked(id); err != nil { t.Fatal(err) }
  if len(s.networkMgr.rulesFor(id)) != 0 { t.Fatal("successful cleanup did not consume the attempted rule") }
 }
+
+func TestDeleteStartKeyAcknowledgesProcessIncarnation(t *testing.T) {
+ first := newTestService(t, map[string]svc.Handler{config.RuntimeNameRunsc: svc.NewFakeRuntimeHandler()})
+ replacement := newTestService(t, map[string]svc.Handler{config.RuntimeNameRunsc: svc.NewFakeRuntimeHandler()})
+ acknowledge := func(s *sandboxService, key string) string {
+  t.Helper()
+  stream := &fenceHeaderStream{}
+  ctx := grpc.NewContextWithServerTransportStream(context.Background(), stream)
+  if _, err := s.Delete(ctx, &runtime.DeleteRequest{StartKey: key}); err != nil { t.Fatal(err) }
+  values := stream.headers.Get("sandboxd-start-fence-instance")
+  if len(values) != 1 || len(values[0]) != 32 { t.Fatalf("missing process incarnation: %v", values) }
+  return values[0]
+ }
+ initial := acknowledge(first, "incarnation-probe")
+ if retry := acknowledge(first, "incarnation-probe"); retry != initial { t.Fatal("same-process retry changed incarnation") }
+ if other := acknowledge(first, "another-key"); other != initial { t.Fatal("same registry changed incarnation for another key") }
+ if restarted := acknowledge(replacement, "incarnation-probe"); restarted == initial { t.Fatal("replacement daemon reused an old cleanup proof") }
+}
+
+type failedFenceEntropy struct{}
+func (failedFenceEntropy) Read([]byte) (int, error) { return 0, errors.New("injected entropy failure") }
+
+func TestStartKeyFenceEntropyFailureReturnsStructuredError(t *testing.T) {
+ instance, err := newStartFenceInstance(failedFenceEntropy{})
+ if instance != "" || status.Code(err) != codes.Internal { t.Fatalf("entropy failure must return Internal without a proof: %q %v", instance, err) }
+}

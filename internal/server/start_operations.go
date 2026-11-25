@@ -16,6 +16,9 @@ package server
 
 import (
 	"context"
+ "crypto/rand"
+ "encoding/hex"
+ "io"
 	"strings"
 
 	runtime "github.com/inclusionAI/sandboxd/api/runtime/v1"
@@ -38,6 +41,25 @@ type startOperation struct {
  cleanupGate chan struct{}
 }
 
+// A fresh registry carries a fresh process incarnation. An acknowledgement from
+// a replacement daemon cannot prove cleanup of an old unpublished native.
+func newStartFenceInstance(reader io.Reader) (string, error) {
+ var nonce [16]byte
+ if _, err := io.ReadFull(reader, nonce[:]); err != nil {
+  return "", status.Error(codes.Internal, "cannot initialize start fence instance")
+ }
+ return hex.EncodeToString(nonce[:]), nil
+}
+
+func (h *sandboxService) initStartRegistryLocked() error {
+ if h.startOperations != nil && h.startFenceInstance != "" { return nil }
+ instance, err := newStartFenceInstance(rand.Reader)
+ if err != nil { return err }
+ h.startFenceInstance = instance
+ if h.startOperations == nil { h.startOperations = make(map[string]*startOperation) }
+ return nil
+}
+
 func validStartKey(key string) bool {
 	return key != "" && len(key) <= 255 && strings.TrimSpace(key) == key
 }
@@ -53,9 +75,7 @@ func (h *sandboxService) beginStart(ctx context.Context, key string) (context.Co
 	}
 	h.startMu.Lock()
 	defer h.startMu.Unlock()
-	if h.startOperations == nil {
-		h.startOperations = make(map[string]*startOperation)
-	}
+ if err := h.initStartRegistryLocked(); err != nil { return nil, nil, err }
 	if op := h.startOperations[key]; op != nil {
 		return nil, nil, status.Error(codes.AlreadyExists, "start key is already used or fenced")
 	}
@@ -92,9 +112,8 @@ func (h *sandboxService) deleteStart(ctx context.Context, req *runtime.DeleteReq
 		return nil, status.Error(codes.Unavailable, "sandbox recovery is incomplete")
 	}
 	h.startMu.Lock()
-	if h.startOperations == nil {
-		h.startOperations = make(map[string]*startOperation)
-	}
+ if err := h.initStartRegistryLocked(); err != nil { h.startMu.Unlock(); return nil, err }
+ instance := h.startFenceInstance
 	op := h.startOperations[req.StartKey]
 	if op == nil {
 		op = &startOperation{done: make(chan struct{}), cleanupGate: make(chan struct{}, 1)}
@@ -153,7 +172,7 @@ func (h *sandboxService) deleteStart(ctx context.Context, req *runtime.DeleteReq
  if err := ctx.Err(); err != nil { return nil, status.FromContextError(err).Err() }
 	// The acknowledgement prevents an older server that ignores start_key from
 	// being mistaken for a server that fenced an unknown attempt.
-	if err := grpc.SetHeader(ctx, metadata.Pairs("sandboxd-start-fenced", "true")); err != nil {
+	if err := grpc.SetHeader(ctx, metadata.Pairs("sandboxd-start-fenced", "true", "sandboxd-start-fence-instance", instance)); err != nil {
 		return nil, status.Error(codes.Internal, "cannot acknowledge start fence")
 	}
 	return &runtime.DeleteResponse{}, nil
